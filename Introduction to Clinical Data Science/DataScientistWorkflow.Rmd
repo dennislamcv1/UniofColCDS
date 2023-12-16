@@ -1,0 +1,410 @@
+---
+title: "The Data Scientist’s Workflow"
+author: "Laura K. Wiley, PhD"
+output:
+  html_document:
+    df_print: paged
+    theme: paper
+  html_notebook: null
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+<br>
+This reading is provided as part of the Introduction to Clinical Data Science, the first of six courses in the Coursera Clinical Data Science Specialization created by the University of Colorado Anschutz Medical Campus and supported by our industry partner Google Cloud.
+
+# {.tabset}
+
+## Loading Packages
+
+Even before we can get data into R we need to tell R that we want to use libraries of code or "packages". The tidyverse is a package of code.
+
+### Installing Packages
+The first time you want to use a package you must install it. We've already installed most of the packages you need, but in case you want to try this on your own computer, to install the tidyverse you would run:
+
+```{r, eval=FALSE}
+install.packages("tidyverse", dependencies = TRUE)
+```
+
+### Making Packages Available
+Once all the packages you want are installed in each R script you write, you will want to call the library() command to make the code available. For this project we are going to want the tidyverse, a package call magrittr, and bigrquery.
+
+```{r, message = FALSE}
+library(tidyverse)
+library(magrittr)
+library(bigrquery)
+```
+
+## Getting Data In/Out {.tabset}
+Depending on the form your data take (database, csv file, excel file, etc.) you will use different R packages to load data. We are going to focus on the two most relevant packages 
+
+* readr - tidyverse packaage that reads text files - files that end in .txt or .csv.
+* bigrquery - package used to access Google BigQuery tables from R.
+
+
+### readr {.tabset}
+readr is fairly straightforward to use - simply provide a data frame you want your file to be loaded into and select the appropriate command:
+
+```{r, eval=FALSE}
+test_csv_data <- read_csv(file = "myfilename.csv")
+test_txt_data <- read_delim(file = "myfilename.txt", delim = "\t")
+```
+
+In this example code the first command will read a csv file named "myfilename.csv" into the data frame test_csv_data. The code in the the second command reads the text file "myfilename.txt", tells R that a tab (\t) is used to separate each column, and reads that data into test_txt_data.
+
+You export data in a similar way:
+
+```{r, eval = FALSE}
+write_csv(x = mydataframe, path = "mynewfile.csv")
+write_delim(x = mydataframe, path = "mynewfile.txt", delim = "\t")
+```
+In this example code, the first line writes a new csv file in the current directory with the data stored in `mydataframe`. The second command creates a tab-delimited file with the same content.
+
+#### For more information on downloading file data, check out:
+* ["Data Import"](https://r4ds.had.co.nz/data-import.html) section of [R for Data Science](https://r4ds.had.co.nz).
+* [readr Tidyverse Page](https://readr.tidyverse.org/) - reading csv and other text files
+* [readxl Tidyverse Page](https://readxl.tidyverse.org/) - reading Excel spreadsheets
+* [haven Tidyverse Page](https://haven.tidyverse.org/) - reading data from SAS, SPSS, and Stata
+
+### bigrquery {.tabset}
+bigrquery requires a bit more setup that reading in text files. 
+
+First you have to set up your connection details. This involves telling bigrquery the name of the billing project where your data is stored. For this course you will use the "learnclinicaldatascience" project. Remember that all the queries of data in this project is completely free to you thanks to our industry partner Google Cloud!
+
+```{r}
+con <- DBI::dbConnect(drv = bigquery(),
+                      project = "learnclinicaldatascience")
+```
+
+Using the dplyr package (which we cover in more detail in the "Tidying and Manipulatin Data" section), we can connect an R dataframe to any table in the project. Let's try connecting the ADMISSIONS table:
+
+```{r}
+admissions <- tbl(con, "mimic3_demo.ADMISSIONS")
+admissions
+```
+
+The first time you run this command, in the Console R will ask you if you want to 
+```
+Use a local file ('.httr-oauth'), to cache OAuth access credentials between R sessions?
+1: Yes
+2: No
+```
+You should select 1 - this will make it easier to connect in the future. After entering 1 into the Console a window will pop up asking you to authenticate with Google. Use the google account you used for the tech-registration. This will cause Google to return a long key phrase that you can copy and paste into the console. Because you saved the credentials to a file, this should be the only time you have to go through this process. The one exception is when you work with RProjects. You will need to go through this process in each project. 
+
+Here is the code you can just copy/paste into your future R scripts:
+
+```{r, eval = FALSE}
+library(bigrquery)
+con <- DBI::dbConnect(drv = bigquery(),
+                      project = "learnclinicaldatascience")
+admissions <- tbl(src = con, "mimic3_demo.ADMISSIONS")
+
+```
+#### Try it out for yourself:
+Connect to the PATIENTS table in mimic3_demo. 
+
+#### For more information on connecting to databases, check out:
+
+* [Databases Using R](https://db.rstudio.com/) - An RStudio help page for connecting to and querying databases
+* [DBI GitHub Page](https://github.com/r-dbi/DBI) - The Github page for the DBI package that you can use to connect to many types of databases
+* [bigrquery GitHub Page](https://github.com/r-dbi/bigrquery) - The Github page page for the database connections to Google BigQuery.
+
+
+## Tidying and Manipulating Data {.tabset}
+There are three primary tidyverse packages you will use to tidy and manipulate data: 
+
+* magrittr
+* tidyr
+* dplyr
+
+There are also a handful of helpful packages for dealing with specific types of data.
+
+* lubridate - wrangles date-time data
+* stringr - wrangle string data
+
+We will cover lubridate and stringr in more detail in later courses of the Clinical Data Science Specialization.
+
+### magrittr {.tabset}
+The magrittr package provides a couple of helpful tools for clinical data science. This package introduced the concept of the pipe, a function that takes data from the left and passes it to functions on the right. There are two types of pipes you'll see us use in the Specialization:
+
+* `%>%` - This is the basic pipe that takes data on the left and passes it to functions on the right.
+* `%<>%` - This pipe takes the data from the left, passes it through the function/s on the right and returns the result back into the original data frame. *Caution! This pipe replaces the original data, use carefully!*
+
+These pipes allow you to actually create an analytic pipeline or chain, where you take the data and connect multiple functions in sequence to perform a particular analysis. You'll see more in the dplyr and tidyr sections of this guide!
+
+##### For more information, check out:
+
+* [Pipes](https://r4ds.had.co.nz/pipes.html) in the [R for Data Science book](https://r4ds.had.co.nz)
+* [magrittr Tidyverse Documention](https://magrittr.tidyverse.org/).
+
+### dplyr {.tabset}
+The dplyr package is the real workhorse of the tidyverse packages. It is the primary tool you will use for data munging. It actually behaves very similarly to SQL and in fact can connect to databases and actually write SQL code for you! Let's go through the same functions that we did in SQL to see how you perform these tasks in R.  
+
+Let's load a couple of tables to use as examples for the following tasks:
+```{r}
+admissions <- tbl(con, "mimic3_demo.ADMISSIONS")
+patients <- tbl(con, "mimic3_demo.PATIENTS")
+```
+
+
+#### Selecting Variables (Columns) {.tabset}
+You can use the select() command to select individuals columns. So if we wanted to select the SUBJECT_ID of the patients table we can run the following code:
+
+```{r}
+patients %>% 
+  select(SUBJECT_ID) 
+```
+
+##### Try it out for yourself:
+Select the date of birth column from patients. 
+
+##### For more information, check out:
+
+* [Select Columns with select()](https://r4ds.had.co.nz/transform.html#select)in the [R for Data Science book](https://r4ds.had.co.nz)
+
+#### Selecting Records (Rows) {.tabset}
+We can use the filter() command to select rows that meet a particular condition. For instance if we want to only select records from patients who are female we can run the following code:
+
+```{r}
+patients %>% 
+  filter(GENDER=="F")
+```
+
+##### Try it out for yourself:
+Filter the admissions table to include only those with an ADMISSION_TYPE of "EMERGENCY".   
+
+##### For more information, check out:
+
+* [Filter Rows with filter()](https://r4ds.had.co.nz/transform.html#filter-rows-with-filter) in the [R for Data Science book](https://r4ds.had.co.nz)
+
+#### Selecting Variables (Columns) and Records (Rows)
+You can combine these values by using another pipe
+
+```{r}
+patients %>% 
+  filter(GENDER=="F") %>% 
+  select(SUBJECT_ID)
+```
+
+#### Renaming Columns {.tabset}
+Just like with SQL we can rename columns if we want to make it more clear what these two columns represent. We can use the dplyr function rename().
+
+```{r}
+patients %>% 
+  rename(patients_ROW_ID = ROW_ID)
+```
+
+##### Try it out for yourself:
+Rename the `EXPIRE_FLAG` column in patients to `DEAD`
+
+
+#### Creating New Variables (Columns) {.tabset}
+A lot of times in clinical data science it is helpful to create new variables based on some data in the table. This functionality is support by the `mutate()` command in dplyr. 
+
+Let's say that we want to make a new variable in the patients table called `EXPIRE_HOSP` that it is `1` if the date of death happened at the hospital (e.g., there is a date in the `DOD_HOSP` column), and a `0` if they did not have an entry in `DOD_HOSP`.
+
+```{r}
+patients %>% 
+  mutate(EXPIRE_HOSP = case_when(is.na(DOD_HOSP) ~ 0,
+                                 TRUE ~ 1))
+```
+
+In this code `mutate()` makes the new column `EXPIRE_HOSP`. Then `case_when()` is used to set up the conditional statement. The function `is.na()` tells us whether `DOD_HOSP` is NA. If so, then we make `EXPIRE_HOSP` equal to `0`. If not then we make `EXPIRE_HOSP` equal to `1`.
+
+##### Try it out for yourself:
+Create a new column in the admissions table `EMERGENCY` that is `1` if the `ADMISSION_TYPE` is `EMERGENCY` and `0` if it is not.    
+
+##### For more information, check out:
+
+* [Add New Variables with mutate()](https://r4ds.had.co.nz/transform.html#add-new-variables-with-mutate) in the [R for Data Science book](https://r4ds.had.co.nz)
+* [case_when() Function Guide](https://dplyr.tidyverse.org/reference/case_when.html)
+
+
+#### Joining Tables {.tabset}
+dplyr has the same types of joins as SQL, but it helpfully will automatically figure out which columns are common across the two data sets. To run an inner join we can run:
+
+```{r}
+patients %>%
+  inner_join(admissions)
+```
+
+Notice that dplyr recognized that the tables have two variables in common:
+
+* ROW_ID
+* SUBJECT_ID
+
+In fact we know that ROW_ID is unique to each table in MIMIC, so we need to adjust the code to only join on the SUBJECT_ID column:
+
+```{r}
+patients %>% 
+  inner_join(admissions, 
+             by = c("SUBJECT_ID"="SUBJECT_ID"),
+             suffix = c("_p","_a"))
+```
+
+We also added the `suffix` argument that takes the duplicate ROW_ID columns from patients and admissions as turns them into:
+
+* ROW_ID_p - the ROW_ID from the patients table
+* ROW_ID_a - the ROW_ID from the admissions table
+
+In addition to inner_join, dplyr also has the following joins:
+
+* left_join() - keeps all rows from the first table in the join
+* right_join() - keeps all rows from the second table in the join
+
+##### Try it out for yourself:
+Create a new dataframe called `icustays` that connects to the ICUSTAYS table then write an inner join between `patients` and `icustays`.
+
+##### For more information, check out:
+
+* [Relational Data](https://r4ds.had.co.nz/relational-data.html) in the [R for Data Science book](https://r4ds.had.co.nz)
+
+#### Aggregating Data {.tabset}
+dplyr has a few functions that can be used to aggregate data. The first is the `group_by()` function. It works just like group by in SQL.
+
+Let's say that we want to identify how many encounters each patient has had. We can `group_by(SUBJECT_ID)` to tell dplyr to consider all rows with the same SUBJECT_ID together. We can then use the `summarise()` function to apply a function like `n_distinct()` which counts all the unique instances of a variable. 
+
+```{r}
+admissions %>% 
+  group_by(SUBJECT_ID) %>% 
+  summarise(count_admissions = n_distinct(HADM_ID))
+```
+
+Should need to apply a different grouping to the same data in the future you can use ungroup() to remove the first grouping.
+
+##### Try it out for yourself:
+How many admissions had an admissions type of `EMERGENCY`?
+
+##### For more information, check out:
+
+* [Grouped Summaries with summarise()](https://r4ds.had.co.nz/transform.html#grouped-summaries-with-summarise) in the [R for Data Science book](https://r4ds.had.co.nz)
+* [Grouped Mutates (and Filters)](https://r4ds.had.co.nz/transform.html#grouped-mutates-and-filters) in the [R for Data Science book](https://r4ds.had.co.nz)
+
+#### Sorting/Ordering Data {.tabset}
+In the aggregating data example we may have wanted to see who had the most admissions and wanted to sort descending by count. dplyr supports reordering rows with the arrange() command. To get the reverse or descending support with the desc() command.
+
+```{r}
+admissions %>% 
+  group_by(SUBJECT_ID) %>% 
+  summarise(count_admissions = n_distinct(HADM_ID)) %>% 
+  arrange(desc(count_admissions)) 
+```
+
+##### Try it out for yourself:
+* Using the icustays dataframe you created, what is the maximum number of ICU stays for any individual patient?
+* Using the icustays dataframe you created, what is the maximum number of ICU stays for any individual hospital stay?
+
+##### For more information, check out:
+* [Arrange Rows with arrange()](https://r4ds.had.co.nz/transform.html#arrange-rows-with-arrange) in the [R for Data Science book](https://r4ds.had.co.nz)
+
+
+### tidyr {.tabset}
+The tidyr package is a companion to dplyr. It is used to help reshape and tidy data sets. There are a few helpful functions you should know:
+
+#### Joining and Separating Columns {.tabset}
+Let's say that we wanted to combine the SUBJECT_ID and HADM_ID variables into a single variable. We can use the `unite()` function.
+
+Unfortunately tidyr functions do not work on external databases connected to R like we've been using. We can use the `collect()` function to load the data that's in the admissions table directly to R. If you ever get odd errors from particular dplyr or tidyr functions, try adding this step to your chain.
+
+```{r}
+admissions %>% 
+  collect() %>% 
+  unite(col = "SUBJECT_HADM_ID", c("SUBJECT_ID", "HADM_ID"), sep = "_", remove = TRUE)
+```
+
+After we get the data locally we can apply the tidyr `unite()` function. In this function col defines what the new, combined, column should be called. The c() argument lists which columns should be combined. sep defines what value should separate the two columns, and remove = TRUE says to remove the original columns from the data frame. If you wanted to keep them, just switch it to remove = FALSE.
+
+If you wanted to undo this process and separate the column back into two variables you can use separate().
+
+```{r}
+admissions %>%
+  collect() %>% 
+  unite(col = "SUBJECT_HADM_ID", c("SUBJECT_ID", "HADM_ID"), sep = "_", remove = TRUE) %>% 
+  separate(col = SUBJECT_HADM_ID, into = c("SUBJECT_ID", "HADM_ID"), sep = "_", remove = TRUE)
+```
+##### Try it out for yourself:
+* Try joining the `ADMISSION_TYPE` and `ADMISSION_LOCATION` columns of `admissions` into a column called `ADMISSION_DETAILS. How many unique values are in `ADMISSION_DETAILS`?
+
+##### For more information, check out:
+* [Separating and Uniting](https://r4ds.had.co.nz/tidy-data.html#separating-and-uniting) in the [R for Data Science book](https://r4ds.had.co.nz)
+
+
+#### Converting Wide Data to Long Data and Back
+The MIMIC-III data is actually already fairly tidy data, so we don't typically need to use these tidyr functions. As such this section is outside the scope of this specialization. However in the real world, most of your data will not be so well currated. I recommended reading the [Spreading and Gathering](https://r4ds.had.co.nz/tidy-data.html#spreading-and-gathering) section of the [R for Data Science book](https://r4ds.had.co.nz) to learn more about these increadibly useful functions.
+
+
+## Analyzing Data
+There are a number of packages in R for performing statistical and machine learning analyses. For the most part in this specialization instead of using the most advanced or complicated analysis tools we instead focus on simple methods that help you understand the impact either 1) the method of clinical data generation, or 2) the clinical implementation goal, has on impact on what analytics you choose to run. 
+
+While we believe that a strong foundation in statistics and computer science is important for success as a clinical data scientist, there are a lot of educational resources that will teach that content far more meaningfully than we could. As such we will be teaching you just the analytic skills you need within each of the subsequent courses in the specialization. For example Course 3 and 4 ("Identifying Patient Populations" and "Clinical Natural Language Processing") both use 2x2 table and statistics like sensitivity and specificity to assess algorithm performance. 
+
+## Visualizing Data {.tabset}
+Somewhat similarly to the analyzing data section, we feel that there are a number of online resources for learning data visualization techniques. However we do want to introduce you to ggplot2 - a tidyverse package for plotting data. This is just a basic introduction - enough to get you started with the package!
+
+Let's plot the demographic features of the cohort using the PATIENTS table
+
+```{r}
+patients %>% 
+  ggplot() +
+    geom_bar(aes(x = GENDER))
+```
+
+ggplot2 works by calling the `ggplot()` command and then adding different visualization layers. In this case we are using `geom_bar()` to make a bar plot. For each geom you have to pass information about you data. Bar plots require some variable for the x axis and then it counts the number of occurrences of the values of that variable to create the y axis. `aes()` is the function that communicates to ggplot what data mappings we want to create, in this case we are plotting `GENDER`. Notice that ggplot uses the same type of piping logic we've been using in the tidyverse with magrittr but instead of `%>%`, ggplot uses the `+`.
+
+Let's try a different table and look at admissions. I'm interested in where patients were discharged.
+
+```{r}
+admissions %>% 
+  ggplot() +
+    geom_bar(aes(x = DISCHARGE_LOCATION))
+```
+
+Obviously we can't read the discharge location - we can adjust the angle of that label to make it easier to read. We can use the `theme()` function to adjust these visual details.
+
+```{r}
+admissions %>% 
+  ggplot() +
+    geom_bar(aes(x = DISCHARGE_LOCATION)) +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+Now let's see what impact admission type had on the discharge location. We can apply a color fill to this variable in the `aes()` command.
+
+```{r}
+admissions %>% 
+  ggplot() +
+    geom_bar(aes(x = DISCHARGE_LOCATION, fill = ADMISSION_TYPE)) +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+This let's us see that the vast majority of admissions were `EMERGENCY` admissions. It can be hard to compare groups when the color bars are stacked together. We can change the position  argument in the `geom_bar()` function to make them appear side-by-side instead.
+
+```{r}
+admissions %>% 
+  ggplot() +
+    geom_bar(aes(x = DISCHARGE_LOCATION, fill = ADMISSION_TYPE), position=position_dodge()) +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+This plot let's us see that for those patients all patients who died during the hospital stay were an `EMERGENCY` or `URGENT` visit. 
+
+### Try it for yourself:
+Create a bar plot of `ADMISSION_LOCATION` that has a fill by `ADMISSION_TYPE`.
+
+### For more information, check out:
+* [Data Visualization](https://r4ds.had.co.nz/data-visualisation.html#introduction-1) section of the [R for Data Science book](https://r4ds.had.co.nz) 
+* [ggplot2 Tidyverse Page](https://ggplot2.tidyverse.org/)
+* [Grammar of Graphics book](https://www.springer.com/us/book/9780387245447) the underlying philosophy of the ggplot2 package
+* [Garrett Grolemund ggplot2 tutorial](https://www.r-project.org/nosvn/conferences/useR-2013/Tutorials/Grolemund.html) a nice introduction to understanding how ggplot graphs are constructed
+* [Graphics for Communication](https://r4ds.had.co.nz/graphics-for-communication.html) from the [R for Data Science book](https://r4ds.had.co.nz) 
+
+## Reporting on Data {.tabset}
+Please see the reading on using RMarkdown on Coursera. 
+
+### For more information, check out:
+* [RMarkdown](https://r4ds.had.co.nz/r-markdown.html) section of the [R for Data Science book](https://r4ds.had.co.nz) 
+* [RMarkdown RStudio Page](https://rmarkdown.rstudio.com/)
+* [RMarkdown Book](https://bookdown.org/yihui/rmarkdown/) by Yihui Xie, J.J. Allaire, and Garrett Grolemund
