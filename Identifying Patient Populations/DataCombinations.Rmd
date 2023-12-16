@@ -1,0 +1,355 @@
+---
+title: "Data Combinations"
+author: "Laura K. Wiley, PhD"
+output:
+  html_document:
+    df_print: paged
+    theme: paper
+    code_folding: show
+  html_notebook: null
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, cache = FALSE)
+library(DT)
+```
+
+<br>
+This reading is provided as part of week three of the "Identifying Patient Populations", the third of six courses in the Coursera Clinical Data Science Specialization created by the University of Colorado Anschutz Medical Campus and supported by our industry partner Google Cloud.
+
+# {.tabset}
+
+Last week you learned how to apply each data type alone to see how even similar types of data can have variable performance. This week we are focused on techniques you can apply to manipulate and combine data elements. This reading will cover how to combine different values of the same type of data (e.g., combining different ICD9 codes) and combining different types of values (e.g., combining ICD9 codes and laboratory data).
+
+Let set up our environment by loading the packages we need, creating the connection to Google BigQuery, and loading the `getStats()` function and the training data.
+
+```{r, message=FALSE}
+library(tidyverse)
+library(magrittr)
+library(bigrquery)
+library(caret)
+
+con <- DBI::dbConnect(drv = bigquery(),
+                      project = "learnclinicaldatascience")
+
+## getStats(df, predicted, reference)
+getStats <- function(df, ...){
+  df %>%
+    select_(.dots = lazyeval::lazy_dots(...)) %>%
+    mutate_all(funs(factor(., levels = c(1,0)))) %>% 
+    table() %>% 
+    confusionMatrix()
+}
+
+training <- tbl(con, "course3_data.diabetes_training")
+```
+
+This next section of the reading is split into two parts:
+
+1. Combining individual types of data
+2. Combining multiple types of data
+
+## Individual Data Type Combinations {.tabset}
+
+As you've seen the readings to date, each type of data be it billing codes, laboratory measurements, or drug prescriptions, have many types of measurements/values possible. In some cases it makes sense to combine these values together before combining with other data types.
+
+### OR 
+
+When you have data types that have high specificity, but low sensitivity, you want to combine these types with an OR. This means that if they have any of the values, then they considered a case. 
+
+Let's use ICD9 codes as our example. Remember how many ICD9 codes for diabetes there were?
+
+```{r, echo = FALSE, eval = TRUE}
+ICD_CODES <- data.frame(stringsAsFactors=FALSE,
+   ICD9_CODE = c("250", "250.0", "250.00", "250.01", "250.02", "250.03", "250.1", "250.10", "250.11",
+                 "250.12", "250.13", "250.2", "250.20", "250.21", '250.22', '250.23', "250.3",
+                 "250.30", "250.31", "250.32", '250.33', '250.4', '250.40', '250.41', '250.42',
+                 "250.43", "250.5", "250.50", '250.51', '250.52', '250.53', '250.6', '250.60', "250.61",
+                 "250.62", "250.63", '250.7', '250.70', "250.71", "250.72", '250.73', "250.8",
+                 "250.80", "250.81", "250.82", "250.83", "250.9", '250.90', "250.91", "250.92",
+                 "250.93"),
+   BQ_ICD9CODE = c('250','2500','25000','25001','25002','25003','2501','25010','25011','25012','25013',
+                   '2502','25020','25021','25022','25023','2503','25030','25031','25032','25033','2504',
+                   '25040','25041','25042','25043','2505','25050','25051','25052','25053','2506','25060',
+                   '25061','25062','25063','2507','25070','25071','25072','25073','2508','25080','25081',
+                   '25082','25083','2509','25090','25091','25092','25093'),
+       LABEL = c("Diabetes mellitus",
+                 "Diabetes mellitus without mention of complication",
+                 "Diabetes mellitus without mention of complication, type II or unspecified type, not stated as uncontrolled",
+                 "Diabetes mellitus without mention of complication, type I [juvenile type],not stated as uncontrolled",
+                 "Diabetes mellitus without mention of complication, type II or unspecified type, uncontrolled",
+                 "Diabetes mellitus without mention of complication, type I [juvenile type], uncontrolled", 
+                 "Diabetes with ketoacidosis",
+                 "Diabetes with ketoacidosis, type II or unspecified type, not stated as uncontrolled",
+                 "Diabetes with ketoacidosis, type I [juvenile type], not stated as uncontrolled", 
+                 "Diabetes with ketoacidosis, type II or unspecified type, uncontrolled", 
+                 "Diabetes with ketoacidosis, type I [juvenile type], uncontrolled", 
+                 "Diabetes with hyperosmolarity",
+                 "Diabetes with hyperosmolarity, type II or unspecified type, not stated as uncontrolled", 
+                 "Diabetes with hyperosmolarity, type I [juvenile type], not stated as uncontrolled",
+                 "Diabetes with hyperosmolarity, type II or unspecified type, uncontrolled",
+                 "Diabetes with hyperosmolarity, type I [juvenile type], uncontrolled",
+                 "Diabetes with other coma", "Diabetes with other coma, type II or unspecified type, not stated as uncontrolled",
+                 "Diabetes with other coma, type I [juvenile type], not stated as uncontrolled",
+                 "Diabetes with other coma, type II or unspecified type, uncontrolled", 
+                 "Diabetes with other coma, type I [juvenile type], uncontrolled", "Diabetes with renal manifestations",
+                 "Diabetes with renal manifestations, type II or unspecified type, not stated as uncontrolled", 
+                 "Diabetes with renal manifestations, type I [juvenile type], not stated as uncontrolled",
+                 "Diabetes with renal manifestations, type II or unspecified type, uncontrolled",
+                 "Diabetes with renal manifestations, type I [juvenile type], uncontrolled", 
+                 "Diabetes with ophthalmic manifestations",
+                 "Diabetes with ophthalmic manifestations, type II or unspecified type, not stated as uncontrolled", 
+                 "Diabetes with ophthalmic manifestations, type I [juvenile type], not stated as uncontrolled",
+                 "Diabetes with ophthalmic manifestations, type II or unspecified type, uncontrolled", 
+                 "Diabetes with ophthalmic manifestations, type I [juvenile type], uncontrolled",
+                 "Diabetes with neurological manifestations", 
+                 "Diabetes with neurological manifestations, type II or unspecified type, not stated as uncontrolled",
+                 "Diabetes with neurological manifestations, type I [juvenile type], not stated as uncontrolled", 
+                 "Diabetes with neurological manifestations, type II or unspecified type, uncontrolled",
+                 "Diabetes with neurological manifestations, type I [juvenile type], uncontrolled",
+                 "Diabetes with peripheral circulatory disorders",
+                 "Diabetes with peripheral circulatory disorders, type II or unspecified type, not stated as uncontrolled",
+                 "Diabetes with peripheral circulatory disorders, type I [juvenile type], not stated as uncontrolled",
+                 "Diabetes with peripheral circulatory disorders, type II or unspecified type, uncontrolled",
+                 "Diabetes with peripheral circulatory disorders, type I [juvenile type], uncontrolled",
+                 "Diabetes with other specified manifestations",
+                 "Diabetes with other specified manifestations, type II or unspecified type, not stated as uncontrolled", 
+                 "Diabetes with other specified manifestations, type I [juvenile type], not stated as uncontrolled",
+                 "Diabetes with other specified manifestations, type II or unspecified type, uncontrolled", 
+                 "Diabetes with other specified manifestations, type I [juvenile type], uncontrolled",
+                 "Diabetes with unspecified complication", "Diabetes with unspecified complication, type II or unspecified type, not stated as uncontrolled",
+                 "Diabetes with unspecified complication, type I [juvenile type], not stated as uncontrolled", 
+                 "Diabetes with unspecified complication, type II or unspecified type, uncontrolled",
+                 "Diabetes with unspecified complication, type I [juvenile type], uncontrolled")
+) %>% tbl_df()
+ICD_CODES %>% select(ICD9_CODE, LABEL) %>% datatable(., options = list(ordering=F, scrollY="200px", scrollCollapse=T,
+  paging=F, searching=F), rownames= FALSE, colnames = c("ICD9 Code", "Label"))
+```
+
+In our previous practice we've seen that most of these codes are specific, but not very sensitive. Let's make an algorithm that labels patients with any of the codes for type II diabetes a case. These codes all have the form 250.X0 and 250.X2
+
+```{r}
+diagnoses_icd <- tbl(con, "mimic3_demo.DIAGNOSES_ICD")
+
+any_t2d_icd <- diagnoses_icd %>% 
+  filter(ICD9_CODE %in% c("25000", "25002","25010", "25012","25020", "25022","25030", 
+                          "25032","25040", "25042","25050", "25052","25060", "25062",
+                          "25070", "25072","25080", "25082","25090", "25092")) %>% 
+  distinct(SUBJECT_ID) %>% 
+  mutate(any_t2d_icd = 1)
+
+training %>% 
+  left_join(any_t2d_icd) %>% 
+  mutate(any_t2d_icd = coalesce(any_t2d_icd, 0)) %>% 
+  collect() %>% 
+  getStats(any_t2d_icd, DIABETES)
+```
+
+This is actually pretty good performance for ICD9 codes! 
+
+```{r, echo = FALSE}
+icd_25000 <- diagnoses_icd %>% 
+  filter(ICD9_CODE == "25000") %>% 
+  distinct(SUBJECT_ID) %>% 
+  mutate(icd_25000 = 1)
+training %<>% 
+  left_join(icd_25000) %>% 
+  mutate(icd_25000 = coalesce(icd_25000, 0))
+training %<>% 
+  left_join(any_t2d_icd) %>% 
+  mutate(any_t2d_icd = coalesce(any_t2d_icd, 0))
+```
+
+Remember that using only ICD9 250.00 had a specificity of `r training %>% collect() %>% getStats(icd_25000, DIABETES) %>% broom::tidy() %>% filter(term == "specificity") %>% mutate(estimate_percent = estimate*100) %$% estimate_percent %>% round(digits = 2)`%, and a sensitivity of `r training %>% collect() %>% getStats(icd_25000, DIABETES) %>% broom::tidy() %>% filter(term == "sensitivity") %>% mutate(estimate_percent = estimate*100) %$% estimate_percent %>% round(digits = 2)`%.
+
+When we allow any of the type II diabetes codes,  the specificity stayed the same at `r training %>% collect() %>% getStats(any_t2d_icd, DIABETES) %>% broom::tidy() %>% filter(term == "specificity") %>% mutate(estimate_percent = estimate*100) %$% estimate_percent %>% round(digits = 2)`%, but the sensitivity improved to `r training %>% collect() %>% getStats(any_t2d_icd, DIABETES) %>% broom::tidy() %>% filter(term == "sensitivity") %>% mutate(estimate_percent = estimate*100) %$% estimate_percent %>% round(digits = 2)`%. 
+
+#### Try it out for yourself:
+
+* What is the sensitivity, specificity, postive predictive value, and negative predictive value of having a prescription for: `metformin`, `glipizide`, `glyburide`, `pioglitazone`, or `insulin`?
+
+### AND
+
+In other cases, you may want to combine a single data type with an AND - that is you must have both types of values for that data type. An example is for medications. Patients who have severe disease may be put on multiple therapies to treat the same condition. Patients who are on multiple therapies for the same condition are more likely to actually have that condition than that both drugs are being used off-label.
+
+For example, let's combine metformin and insulin.
+
+```{r}
+prescriptions <- tbl(con, "mimic3_demo.PRESCRIPTIONS")
+
+metformin_and_insulin <- prescriptions %>% 
+  filter(lower(DRUG) %like% "metformin" |
+           lower(DRUG) %like% "insulin") %>% 
+  mutate(metformin_counter = case_when(lower(DRUG) %like% "%metformin%" ~ 1,
+                                       TRUE ~ 0),
+         insulin_counter = case_when(lower(DRUG) %like% "%insulin%" ~ 1,
+                                     TRUE ~ 0)) %>% 
+  group_by(SUBJECT_ID) %>% 
+  summarise(any_metformin = max(metformin_counter, na.rm = TRUE),
+            any_insulin = max(insulin_counter, na.rm = TRUE)) %>% 
+  filter(any_metformin == 1,
+         any_insulin == 1) %>% 
+  mutate(metformin_and_insulin = 1)
+
+training %>% 
+  left_join(metformin_and_insulin) %>% 
+  mutate(metformin_and_insulin = coalesce(metformin_and_insulin, 0)) %>% 
+  collect() %>% 
+  getStats(metformin_and_insulin, DIABETES)
+```
+
+Let's go through this code in more detail. The first `filter()` command selects all metformin and insulin prescriptions. Then I created two counter variables `metformin_counter` and `insulin_counter` which are set to `1` when the drug name is metformin or insulin respectively. Then we summarise for each patient the max value (e.g., if they have one or more prescriptions for metformin `any_metformin` will equal `1`). Then we `filter()` to those that have both metformin and insulin. 
+
+Importantly, although this increased the specificity compared to insulin alone, the sensitivity was very poor because metformin is present in so few records. In general when you use an `AND` combination, the sensitivity is defined by your least sensitive variable.
+
+#### Try it out for yourself:
+
+* What is the sensitivity, specificity, postive predictive value, and negative predictive value of having a prescription for `glipizide` AND `insulin`?
+
+## Multiple Data Type Combinations {.tabset}
+
+Let's use three types of data:
+
+1. any type II diabetes ICD9 code
+2. any blood glucose blood gas measurement greater than 200 mg/dL
+3. any prescription for insulin
+
+We can create three dataframes that contain this information:
+
+```{r}
+labevents <- tbl(con, "mimic3_demo.LABEVENTS")
+d_labitems <- tbl(con, "mimic3_demo.D_LABITEMS")
+
+any_t2d_icd <- diagnoses_icd %>% 
+  filter(ICD9_CODE %in% c("25000", "25002","25010", "25012","25020", "25022","25030", 
+                          "25032","25040", "25042","25050", "25052","25060", "25062",
+                          "25070", "25072","25080", "25082","25090", "25092")) %>% 
+  distinct(SUBJECT_ID) %>% 
+  mutate(any_t2d_icd = 1)
+
+any_glucose_blood_bg_over200 <- labevents %>% 
+  inner_join(d_labitems, by = c("ITEMID" = "ITEMID"), suffix = c("_l","_d")) %>% 
+  filter(LABEL == "Glucose",
+         FLUID == "Blood",
+         CATEGORY == "Blood Gas") %>% 
+  group_by(SUBJECT_ID) %>% 
+  mutate(glucose_blood_bg_over200_marker = case_when(VALUENUM >= 200 ~ 1,
+                                                     TRUE ~0)) %>% 
+  summarise(any_glucose_blood_bg_over200 = max(glucose_blood_bg_over200_marker, na.rm = TRUE)) %>% 
+  select(SUBJECT_ID, any_glucose_blood_bg_over200)
+
+any_insulin <- prescriptions %>% 
+  filter(lower(DRUG) %like% "insulin") %>% 
+  distinct(SUBJECT_ID) %>% 
+  mutate(any_insulin = 1)
+```
+### ICD9 OR Glucose>=200mg/dL OR Insulin Prescription
+
+Let's do the most permission combination - cases can have any type II diabetes ICD9 code, or a glucose measurement of 200 mg/dL or higher, or a prescription for insulin.
+
+```{r}
+training %>% 
+  left_join(any_t2d_icd) %>% 
+  left_join(any_glucose_blood_bg_over200) %>% 
+  left_join(any_insulin) %>% 
+  mutate(any_t2d_icd = coalesce(any_t2d_icd, 0),
+         any_glucose_blood_bg_over200 = coalesce(any_glucose_blood_bg_over200, 0),
+         any_insulin = coalesce(any_insulin, 0)) %>% 
+  mutate(icd_or_glucose_or_insulin = case_when(any_t2d_icd == 1 |
+                                                 any_glucose_blood_bg_over200 == 1 |
+                                                 any_insulin == 1 ~ 1,
+                                               TRUE ~ 0)) %>% 
+  collect() %>% 
+  getStats(icd_or_glucose_or_insulin, DIABETES)
+```
+
+In this code we `left_join()` all three data frames, make sure to set the values for the variables to `0` when there wasn't a record in one of the data frames using `coalesce()`, and then finally combine the three data types. In R the OR command is a vertical bar `|`. 
+
+Although this method has a fairly high sensitivity, the specificity is very low.
+
+#### Try it out for yourself:
+* What is the sensitivity, specificity, postive predictive value, and negative predictive value of having any ICD9 code OR an HbA1c > 6.5% OR a metformin prescription?
+
+### ICD9 AND Glucose>=200mg/dL AND Insulin Prescription
+
+Let's do the most restrictive combination - cases must have a type II diabetes ICD9 code, and a glucose measurement of 200 mg/dL or higher, and a prescription for insulin.
+
+```{r}
+training %>% 
+  left_join(any_t2d_icd) %>% 
+  left_join(any_glucose_blood_bg_over200) %>% 
+  left_join(any_insulin) %>% 
+  mutate(any_t2d_icd = coalesce(any_t2d_icd, 0),
+         any_glucose_blood_bg_over200 = coalesce(any_glucose_blood_bg_over200, 0),
+         any_insulin = coalesce(any_insulin, 0)) %>% 
+  mutate(icd_and_glucose_and_insulin = case_when(any_t2d_icd == 1 &&
+                                                 any_glucose_blood_bg_over200 == 1 &&
+                                                 any_insulin == 1 ~ 1,
+                                               TRUE ~ 0)) %>%
+  collect() %>% 
+  getStats(icd_and_glucose_and_insulin, DIABETES)
+```
+
+Now the algorithm has perfect specificity, but very low sensitivity. Let's try more nuanced combinations.
+
+#### Try it out for yourself:
+* What is the sensitivity, specificity, postive predictive value, and negative predictive value of having any ICD9 code AND an HbA1c > 6.5% AND a metformin prescription?
+
+### Insulin Prescription AND (ICD9 OR Glucose>=200mg/dL)
+
+Remember that we can apply parentheses to our combinations to get more complex algorithms. We know that insulin is a fairly non-specific identifier in the database. Let's only use insulin prescriptions when the paper has another piece of evidence indicating they are a diabetic - either an ICD9 code or an elevated glucose measurement
+
+```{r}
+training %>% 
+  left_join(any_t2d_icd) %>% 
+  left_join(any_glucose_blood_bg_over200) %>% 
+  left_join(any_insulin) %>% 
+  mutate(any_t2d_icd = coalesce(any_t2d_icd, 0),
+         any_glucose_blood_bg_over200 = coalesce(any_glucose_blood_bg_over200, 0),
+         any_insulin = coalesce(any_insulin, 0)) %>% 
+  mutate(insulin_and_ICDorGlucose = case_when(any_insulin == 1 &&
+                                                (any_glucose_blood_bg_over200 ==1 | any_t2d_icd == 1) ~ 1,
+                                              TRUE ~0)) %>%
+  collect() %>% 
+  getStats(insulin_and_ICDorGlucose, DIABETES)
+```
+
+```{r, echo = FALSE}
+training %<>% 
+  left_join(any_t2d_icd) %>% 
+  left_join(any_glucose_blood_bg_over200) %>% 
+  left_join(any_insulin) %>% 
+  mutate(any_t2d_icd = coalesce(any_t2d_icd, 0),
+         any_glucose_blood_bg_over200 = coalesce(any_glucose_blood_bg_over200, 0),
+         any_insulin = coalesce(any_insulin, 0)) %>% 
+  mutate(insulin_and_ICDorGlucose = case_when(any_insulin == 1 &&
+                                                (any_glucose_blood_bg_over200 ==1 || any_t2d_icd == 1) ~ 1, TRUE ~ 0))
+```
+
+Using insulin alone had a specificity of `r training %>% collect() %>% getStats(any_insulin, DIABETES) %>% broom::tidy() %>% filter(term == "specificity") %>% mutate(estimate_percent = estimate*100) %$% estimate_percent %>% round(digits = 2)`%, and a sensitivity of `r training %>% collect() %>% getStats(any_insulin, DIABETES) %>% broom::tidy() %>% filter(term == "sensitivity") %>% mutate(estimate_percent = estimate*100) %$% estimate_percent %>% round(digits = 2)`%.
+
+By requiring that patients with insuline must also have a record of an ICD9 code or high glucose measurement we raised the specificity to `r training %>% collect() %>% getStats(insulin_and_ICDorGlucose, DIABETES) %>% broom::tidy() %>% filter(term == "specificity") %>% mutate(estimate_percent = estimate*100) %$% estimate_percent %>% round(digits = 2)`%, and only dropped the sensitivity to `r training %>% collect() %>% getStats(insulin_and_ICDorGlucose, DIABETES) %>% broom::tidy() %>% filter(term == "sensitivity") %>% mutate(estimate_percent = estimate*100) %$% estimate_percent %>% round(digits = 2)`%.
+
+#### Try it out for yourself:
+* What is the sensitivity, specificity, postive predictive value, and negative predictive value of having an HbA1c > 6.5% AND either an ICD9 code or a metformin prescription?
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

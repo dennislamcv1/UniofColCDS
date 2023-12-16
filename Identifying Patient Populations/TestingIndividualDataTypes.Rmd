@@ -1,0 +1,375 @@
+---
+title: "Testing Individual Data Types"
+author: "Laura K. Wiley, PhD"
+output:
+  html_document:
+    df_print: paged
+    theme: paper
+  html_notebook: null
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE)
+library(DT)
+```
+
+<br>
+Welcome to the first coding example of Identify Patient Populations, the third course in the Coursera Clinical Data Science Specialization created by the University of Colorado Anschutz Medical Campus and supported by our industry partner Google Cloud. 
+
+As was mentioned in Week 1, as we move through the course we will be demonstrating each of the tools and techniques you can apply for computational phenotyping with the example phenotype of type II diabetes. The first half of this reading contains important background information on what type II diabetes is and how it is diagnosed and treated. Don't worry if you don't fully understand all of the medical information. As a real clinical data scientist you will find yourself working in areas that you aren't as familiar with - this is why it is essential to have clinical expert collaborators or consultants as part of clinical data science teams.
+
+# Background on Diabetes {.tabset}
+Type II diabetes is a type of diabetes that is caused by the body no longer recognizing and appropriately responding to insulin. 
+
+## Diagnostic Criteria
+Type II diabetes is diagnosed when:
+
+* A fasting plasma glucose level of 126 mg/dL (7.0 mmol/L) or higher **-OR-**
+* A 2-hour plasma glucose level of 200 mg/dL (11.1 mmol/L) or higher during a 75g oral glucose tolerance test (OGTT) **-OR-**
+* A random plasma glucose of 200 mg/dL (11.1 mmol/L) or higher in a patient with symptoms of hyperglycemia **-OR-**
+* A Hemoglobin A1C (HbA1C) of 6.5% or higher.
+
+## Treatments
+At initial stages of the disease most patients are still able to produce insulin but the target organs of insulin action have a reduced response. These patients are considered to be non-insulin dependent diabetics. At this stage the goal of treatment is to increase the body's sensitivity to insulin and/or increase insulin production after a meal (when insulin is usually produced). This can sometimes be achieved through changes to diet and exercise. Possible drug therapies (roughly in order of frequency from most common to least common) are:
+
+* Metformin
+* Sulfonylureas - e.g., glyburide, glimepiride, chlorpropamide, glipizide, tolazamide, tolbutamide
+* Thiazolidinedione - e.g., prioglitazone, rosiglitazone
+* DPP-4 inhibitors - e.g., sitagliptin, saxagliptin, linagliptin, alogliptin
+* SGLT2 inhibitors - e.g., canagliflozin, dapagliflozin, empagliflozin
+* GLP-1 receptor agonists - e.g., exenatide, liraglutide, lixisenatide, albiglutide, dulaglutide, semaglutide
+
+Metformin is by far the most common initial treatment for type II diabetes because it works reasonably well, has few side effects, and does not cause low blood sugar levels – a dangerous side effect of some diabetes medications. Some considerations that may go into selecting a drug include: 
+
+* Whether the patient has cardiovascular disease (the SGLT2 inhibitors and GLP-1 receptor agonists are recommended in individuals with known cardiovascular disease).
+* Whether the patient has kidney disease (metformin in particular cannot be used in individuals with advanced chronic kidney disease).
+* Whether the patient is old or has any risk factors for hypoglycemia (sulfonylureas would be avoided in that scenario). 
+
+As the disease progresses, patients with type II diabetes may become insulin dependent.
+
+Importantly, when patients are admitted to the hospital, especially in the ICU, diabetes is managed with insulin. Insulin gives better and more precise control over glucose levels than traditional therapies. Medications the patient is usually on, like metformin, are typically not given while the patient is in the hospital. This is especially true for metformin as the metformin dosing depends on kidney function, and when a patient has an acute illness their kidney function may change over time which makes it difficult to find the right dose of metformin.
+
+
+## Laboratory Tests
+As demonstrated by the diagnostic criteria, there are a number of laboratory tests used to diagnose diabetes including:
+
+* plasma (blood) glucose, fasting
+* plasma (blood) glucose, random
+* plasma (blood) glucose, after OGTT
+* HbA1C
+
+Healthcare providers also often test insulin levels when a patient is first diagnosed with diabetes to determine if he/she has type I or type II diabetes.
+
+# Programming Examples {.tabset}
+
+Let set up our environment. We need four packages:
+
+* tidyverse - group of packages for data wrangling and visualization
+* magrittr - package for piping data analysis chains
+* bigrquery - package for connecting to bigquery database
+* caret - package for statistical analysis
+
+We also set up our connection to the Google BigQuery project to be able to access the MIMIC-III demo data. If you aren't familiar with these packages I highly recommend working through the R programming section of "Introduction to Clinical Data Science", the first course in the Coursera Clinical Data Science Specialization. We have included a few of the readings from that course for your reference.
+
+```{r, message=FALSE}
+library(tidyverse)
+library(magrittr)
+library(bigrquery)
+library(caret)
+
+con <- DBI::dbConnect(drv = bigquery(),
+                      project = "learnclinicaldatascience")
+```
+
+This next section of the reading is split into two parts:
+
+1. Techniques for calculating algorithm performance with the results of manual record review. 
+2. Querying different data types and seeing how each different data type performs individually. 
+
+## Calculating Algorithm Performance 
+
+### Manual Record Review Results
+Although we are limited in sharing the text notes for the patient in the demo dataset, we have access to those notes and have manually reviewed the records to determine if the patients have a history of type II diabetes. A description of the manual review protocol used is available in the [Introduction to Course Example](https://www.coursera.org/learn/computational-phenotyping/supplement/MAPhu/introduction-to-course-example) reading. 
+
+The results of the manual record review are stored in the course3_data.diabetes_goldstandard table in the Google BigQuery learnclinicaldatascience project.
+
+```{r}
+diabetes <- tbl(con, "course3_data.diabetes_goldstandard")
+diabetes
+```
+
+In this table the DIABETES column is a 1 if the patient has a record of type II diabetes and a 0 if they did not have the condition.
+
+Of the 100 patients in the demo data set, 99 had notes that could be reviewed. Of those 99 records reviewed, `r diabetes %>% filter(DIABETES==1) %>% count() %>% collect() %>% slice(1) %$% n` had type II diabetes. 
+
+### Creating Training and Testing Populations
+Notice that we are using the Gold-Standard approach to phenotyping algorithm development. If we use the entire data set in our algorithm development then we are likely overfitting our sample and our algorithm won't perform well on a larger dataset. To avoid this overfitting, we can separate our gold standard population into training and testing populations. We use the training population to develop our algorithm, then we check the final performance of that algorithm in the testing population. Let's do a roughly 80/20 split. We will put 80 records in the training population and the remaining 19 records will be our testing population.
+
+```{r, eval = FALSE}
+training <- diabetes %>% 
+  collect() %>% 
+  sample_n(80)
+```
+
+You may have noticed that I added an extract function in the pipe - `collect()`. This function tells R to download the data from the Google BigQuery database into R for further processing. The `sample_n()` function in dplyr randomly selects the number of rows you require - in this case 80.
+
+To create our testing population we can just invert this list.
+
+```{r, eval = FALSE}
+testing <- diabetes %>% 
+  filter(!SUBJECT_ID %in% training_population$SUBJECT_ID)
+```
+
+Because the sample function will produce difference populations everytime you call this function, I have stored these populations in Google BigQuery in the `course3_data.diabetes_training` and `course3_data.diabetes_testing` tables. You should *only* use these tables when doing graded class exercises as they will be used to calculate the correct answers.
+
+Since we are in the algorithm development process, we will load the training population data to use for the rest of this training.
+
+```{r}
+training <- tbl(con, "course3_data.diabetes_training")
+```
+
+### Function to Calculate Performance 
+As discussed in [Data Types for Compuational Phenotyping](https://www.coursera.org/learn/computational-phenotyping/lecture/kyDmV/data-types-for-computational-phenotyping). There are four primary metrics you should use to assess algorithm performance:
+
+* Sensitivity
+* Specificity
+* Positive Predictive Value
+* Negative Predictive Value
+
+It is also helpful to have a copy of the 2x2 table used to calculate these metrics because it can reveal common programming errors (like the number of records across all the boxes isn't the same as the number of records reviewed).
+
+While you can create these 2x2 tables and calculate these performance metrics by hand, it's a lot easier to use a function that will return all of these in a single step. The caret package in R has a function called confusionMatrix() that outputs all of this information. I have written a wrapper function to make it easier to use.
+
+```{r}
+## getStats(df, predicted, reference)
+getStats <- function(df, ...){
+  df %>%
+    select_(.dots = lazyeval::lazy_dots(...)) %>%
+    mutate_all(funs(factor(., levels = c(1,0)))) %>% 
+    table() %>% 
+    confusionMatrix()
+}
+```
+
+This function accepts a data frame that has at least two columns - one column that has the algorithm you built ("predicted") and one column that has the results from the manual record review ("reference"). We'll see this function in action in the "Querying and Assessing Individual Data Types" tabs. 
+
+## Querying and Assessing Individual Data Types {.tabset}
+
+### ICD Codes
+
+There are many ICD9 codes for diabetes:
+
+```{r, echo = FALSE, eval = TRUE}
+ICD_CODES <- data.frame(stringsAsFactors=FALSE,
+   ICD9_CODE = c("250", "250.0", "250.00", "250.01", "250.02", "250.03", "250.1", "250.10", "250.11",
+                 "250.12", "250.13", "250.2", "250.20", "250.21", '250.22', '250.23', "250.3",
+                 "250.30", "250.31", "250.32", '250.33', '250.4', '250.40', '250.41', '250.42',
+                 "250.43", "250.5", "250.50", '250.51', '250.52', '250.53', '250.6', '250.60', "250.61",
+                 "250.62", "250.63", '250.7', '250.70', "250.71", "250.72", '250.73', "250.8",
+                 "250.80", "250.81", "250.82", "250.83", "250.9", '250.90', "250.91", "250.92",
+                 "250.93"),
+   BQ_ICD9CODE = c('250','2500','25000','25001','25002','25003','2501','25010','25011','25012','25013',
+                   '2502','25020','25021','25022','25023','2503','25030','25031','25032','25033','2504',
+                   '25040','25041','25042','25043','2505','25050','25051','25052','25053','2506','25060',
+                   '25061','25062','25063','2507','25070','25071','25072','25073','2508','25080','25081',
+                   '25082','25083','2509','25090','25091','25092','25093'),
+       LABEL = c("Diabetes mellitus",
+                 "Diabetes mellitus without mention of complication",
+                 "Diabetes mellitus without mention of complication, type II or unspecified type, not stated as uncontrolled",
+                 "Diabetes mellitus without mention of complication, type I [juvenile type],not stated as uncontrolled",
+                 "Diabetes mellitus without mention of complication, type II or unspecified type, uncontrolled",
+                 "Diabetes mellitus without mention of complication, type I [juvenile type], uncontrolled", 
+                 "Diabetes with ketoacidosis",
+                 "Diabetes with ketoacidosis, type II or unspecified type, not stated as uncontrolled",
+                 "Diabetes with ketoacidosis, type I [juvenile type], not stated as uncontrolled", 
+                 "Diabetes with ketoacidosis, type II or unspecified type, uncontrolled", 
+                 "Diabetes with ketoacidosis, type I [juvenile type], uncontrolled", 
+                 "Diabetes with hyperosmolarity",
+                 "Diabetes with hyperosmolarity, type II or unspecified type, not stated as uncontrolled", 
+                 "Diabetes with hyperosmolarity, type I [juvenile type], not stated as uncontrolled",
+                 "Diabetes with hyperosmolarity, type II or unspecified type, uncontrolled",
+                 "Diabetes with hyperosmolarity, type I [juvenile type], uncontrolled",
+                 "Diabetes with other coma", "Diabetes with other coma, type II or unspecified type, not stated as uncontrolled",
+                 "Diabetes with other coma, type I [juvenile type], not stated as uncontrolled",
+                 "Diabetes with other coma, type II or unspecified type, uncontrolled", 
+                 "Diabetes with other coma, type I [juvenile type], uncontrolled", "Diabetes with renal manifestations",
+                 "Diabetes with renal manifestations, type II or unspecified type, not stated as uncontrolled", 
+                 "Diabetes with renal manifestations, type I [juvenile type], not stated as uncontrolled",
+                 "Diabetes with renal manifestations, type II or unspecified type, uncontrolled",
+                 "Diabetes with renal manifestations, type I [juvenile type], uncontrolled", 
+                 "Diabetes with ophthalmic manifestations",
+                 "Diabetes with ophthalmic manifestations, type II or unspecified type, not stated as uncontrolled", 
+                 "Diabetes with ophthalmic manifestations, type I [juvenile type], not stated as uncontrolled",
+                 "Diabetes with ophthalmic manifestations, type II or unspecified type, uncontrolled", 
+                 "Diabetes with ophthalmic manifestations, type I [juvenile type], uncontrolled",
+                 "Diabetes with neurological manifestations", 
+                 "Diabetes with neurological manifestations, type II or unspecified type, not stated as uncontrolled",
+                 "Diabetes with neurological manifestations, type I [juvenile type], not stated as uncontrolled", 
+                 "Diabetes with neurological manifestations, type II or unspecified type, uncontrolled",
+                 "Diabetes with neurological manifestations, type I [juvenile type], uncontrolled",
+                 "Diabetes with peripheral circulatory disorders",
+                 "Diabetes with peripheral circulatory disorders, type II or unspecified type, not stated as uncontrolled",
+                 "Diabetes with peripheral circulatory disorders, type I [juvenile type], not stated as uncontrolled",
+                 "Diabetes with peripheral circulatory disorders, type II or unspecified type, uncontrolled",
+                 "Diabetes with peripheral circulatory disorders, type I [juvenile type], uncontrolled",
+                 "Diabetes with other specified manifestations",
+                 "Diabetes with other specified manifestations, type II or unspecified type, not stated as uncontrolled", 
+                 "Diabetes with other specified manifestations, type I [juvenile type], not stated as uncontrolled",
+                 "Diabetes with other specified manifestations, type II or unspecified type, uncontrolled", 
+                 "Diabetes with other specified manifestations, type I [juvenile type], uncontrolled",
+                 "Diabetes with unspecified complication", "Diabetes with unspecified complication, type II or unspecified type, not stated as uncontrolled",
+                 "Diabetes with unspecified complication, type I [juvenile type], not stated as uncontrolled", 
+                 "Diabetes with unspecified complication, type II or unspecified type, uncontrolled",
+                 "Diabetes with unspecified complication, type I [juvenile type], uncontrolled")
+) %>% tbl_df()
+ICD_CODES %>% select(ICD9_CODE, LABEL) %>% datatable(., options = list(ordering=F, scrollY="200px", scrollCollapse=T,
+  paging=F, searching=F), rownames= FALSE, colnames = c("ICD9 Code", "Label"))
+```
+
+Let's try the first one 250.00 - Diabetes mellitus without mention of complication, type II or unspecified type, not stated as uncontrolled.
+
+The first thing we need to do is identify all unique individuals who have the code 25000 in the DIAGNOSES_ICD table:
+
+```{r}
+diagnoses_icd <- tbl(con, "mimic3_demo.DIAGNOSES_ICD")
+
+icd_25000 <- diagnoses_icd %>% 
+  filter(ICD9_CODE == "25000") %>% 
+  distinct(SUBJECT_ID) %>% 
+  mutate(icd_25000 = 1)
+```
+
+Let's step through this code. 
+
+* The first line connects the `diagnoses_icd` dataframe with the `mimic3_demo.DIAGNOSES_ICD` table in Google BigQuery. 
+* The second block of code is the key step of preparing your data for comparison:
+    * We filter the diagnoses_icd dataframe to only include those individuals who have an `ICD9_CODE` = 250.00 (note that in MIMIC-III the ICD9 code is stored without the decimal point)
+    * We get a list of all unique `PATIENT_ID` records that had that code.
+    * We create a new indicator variable - `icd_25000` that equals `1` for all patients in the dataframe.
+    * The result of this chain is stored in the dataframe `icd_25000`
+    
+```{r}
+icd_25000
+```
+
+We then can join `icd_25000` with the `diabetes` data frame that contains the record of our manual review results.
+
+```{r}
+training %>% 
+  left_join(icd_25000)
+```
+
+Notice that I used a left joint to keep all the manual review records in place, and that those records that don't have an ICD code are labeled as NA. This doesn't work well for the data calculations we have to perform so we will use the function "coalesce" to put a 0 everywhere the is an NA.
+
+```{r}
+training %>% 
+  left_join(icd_25000) %>% 
+  mutate(icd_25000 = coalesce(icd_25000, 0))
+```
+
+Now I have two columns each where 1 is positive and 0 is negative.
+
+Let's save these results to the diabetes data frame, we can use the `%<>%` pipe to do this in a single step.
+
+```{r}
+training %<>% 
+  left_join(icd_25000) %>% 
+  mutate(icd_25000 = coalesce(icd_25000, 0))
+```
+
+And now we can use our `getStats()` function to calculate the performance of `icd_25000`:
+
+```{r}
+training %>% 
+  collect() %>% 
+  getStats(icd_25000, DIABETES)
+```
+
+Let's look at our results. This code actually performs fairly well. ICD9 250.00 has a decent specificity of `r training %>% collect() %>% getStats(icd_25000, DIABETES) %>% broom::tidy() %>% filter(term == "specificity") %>% mutate(estimate_percent = estimate*100) %$% estimate_percent %>% round(digits = 2)`%. However the sensitivity is not great at only `r training %>% collect() %>% getStats(icd_25000, DIABETES) %>% broom::tidy() %>% filter(term == "sensitivity") %>% mutate(estimate_percent = estimate*100) %$% estimate_percent %>% round(digits = 2)`%.
+
+#### Try it out for yourself:
+
+* Calculate the four metrics of performance (sensitivity, specificity, ppv, and npv) for ICD9 code 250.02
+* Try to calculate the four metrics of performance for at least two more ICD9 codes 
+
+### Laboratory Data
+
+As described in the introduction, there are a number of laboratory tests used to diagnose diabetes.
+
+Let's take a look at just Hemoglobin A1C. MIMIC-III records lab tests with a variety of labels. You can search these labels in the D_LABITEMS table.
+
+I ran the following query at bigquery.cloud.google.com:
+
+```{sql, eval=FALSE}
+select * from mimic3_demo.D_LABITEMS where lower(LABEL) like "%a1c%"
+```
+
+Notice that I use the lower() function to avoid different capitalizations, and I used the % to indicate that it can match anything. 
+
+The results were:
+
+|ITEMID|LABEL|
+|------|-----------|
+|50852|% Hemoglobin A1c|
+|50854|Absolute A1c|
+
+Remember that most lab tests are run for a reason. Because HbA1C is used to diagnose diabetes let's see how ever having the test, regardless of the test value, performs in identifying our diabetics.
+
+```{r}
+labevents <- tbl(con, "mimic3_demo.LABEVENTS")
+
+hba1c <- labevents %>% 
+  filter(ITEMID %in% c(50852,50854)) %>% 
+  distinct(SUBJECT_ID) %>% 
+  mutate(hba1c = 1)
+
+training %<>% 
+  left_join(hba1c) %>% 
+  mutate(hba1c = coalesce(hba1c, 0))
+
+training %>% 
+  collect() %>% 
+  getStats(hba1c, DIABETES)
+```
+
+Let's look at our results. The combined HbA1c labs have a moderate specificity of `r training %>% collect() %>% getStats(hba1c, DIABETES) %>% broom::tidy() %>% filter(term == "specificity") %>% mutate(estimate_percent = estimate*100) %$% estimate_percent %>% round(digits = 2)`%. However the sensitivity is very poor at only `r training %>% collect() %>% getStats(hba1c, DIABETES) %>% broom::tidy() %>% filter(term == "sensitivity") %>% mutate(estimate_percent = estimate*100) %$% estimate_percent %>% round(digits = 2)`%.
+
+#### Try it out for yourself:
+
+* Calculate the four metrics of performance (sensitivity, specificity, ppv, and npv) for "Glucose, Blood, Chemistry", that is, the lab value where the `LABEL` is `Glucose`, `FLUID` is `Blood`, and `CATEGORY` is `Blood Gas`.
+* Try to calculate the four metrics of performance for at least two more lab values. Some things to consider trying:
+    - Does `50852 - % Hemoglobin A1c` perform the same as `50854 - Absolute A1c`?
+    - How do the various glucose measurements of different bodily fluids or different lab categories perform?
+
+### Medication Data
+
+As described in the introduction, there are a number of medications used to treat diabetes. Let's try the first-line treatment metformin.
+
+Just like the SQL code we used in the Laboratory Test Data section, we can apply the same fuzzy match we use is SQL with the `%like%` command. By also putting `%` around metformin we capture all `DRUG` names that have metformin in them. You also will want to use the `tolower()` command to make sure that it matches any capitalization of the `DRUG`. 
+
+```{r}
+prescriptions <- tbl(con, "mimic3_demo.PRESCRIPTIONS")
+
+metformin <- prescriptions %>% 
+  filter(tolower(DRUG) %like% "%metformin%") %>% 
+  distinct(SUBJECT_ID) %>% 
+  mutate(metformin = 1)
+
+training %<>% 
+  left_join(metformin) %>% 
+  mutate(metformin = coalesce(metformin, 0))
+
+training %>% 
+  collect() %>% 
+  getStats(metformin, DIABETES)
+```
+
+Let's look at our results. Metformin has a perfect specificity of `r training %>% collect() %>% getStats(metformin, DIABETES) %>% broom::tidy() %>% filter(term == "specificity") %>% mutate(estimate_percent = estimate*100) %$% estimate_percent %>% round(digits = 2)`%. However the sensitivity is exceptionally poor at only `r training %>% collect() %>% getStats(metformin, DIABETES) %>% broom::tidy() %>% filter(term == "sensitivity") %>% mutate(estimate_percent = estimate*100) %$% estimate_percent %>% round(digits = 2)`%. This is likely due to the fact that most hospitalized patients are transitioned to insulin during their hospital stay.
+
+#### Try it out for yourself:
+
+* Calculate the four metrics of performance (sensitivity, specificity, ppv, and npv) for the medication `Glipizide`
+* Try to calculate the four metrics of performance for at least two more medications.
+

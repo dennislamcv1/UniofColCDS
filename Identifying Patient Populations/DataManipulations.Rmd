@@ -1,0 +1,410 @@
+---
+title: "Data Manipulations"
+author: "Laura K. Wiley, PhD"
+output:
+  html_document:
+    df_print: paged
+    theme: paper
+    code_folding: show
+  html_notebook: null
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE)
+library(DT)
+```
+
+<br>
+This reading is provided as part of week three of the "Identifying Patient Populations", the third of six courses in the Coursera Clinical Data Science Specialization created by the University of Colorado Anschutz Medical Campus and supported by our industry partner Google Cloud.
+
+# {.tabset}
+
+Last week you learned how to apply each data type alone to see how even similar types of data can have variable performance. This week we are focused on techniques you can apply to manipulate and combine data elements. This reading will cover the three major types of data manipulations commonly used in computational phenotyping. 
+
+Let set up our environment by loading the packages we need, creating the connection to Google BigQuery, and loading the `getStats()` function and the training data.
+
+```{r, message=FALSE}
+library(tidyverse)
+library(magrittr)
+library(bigrquery)
+library(caret)
+
+con <- DBI::dbConnect(drv = bigquery(),
+                      project = "learnclinicaldatascience")
+
+## getStats(df, predicted, reference)
+getStats <- function(df, ...){
+  df %>%
+    select_(.dots = lazyeval::lazy_dots(...)) %>%
+    mutate_all(funs(factor(., levels = c(1,0)))) %>% 
+    table() %>% 
+    confusionMatrix()
+}
+
+training <- tbl(con, "course3_data.diabetes_training")
+```
+
+This next section of the reading is split into three parts:
+
+1. Techniques for frequency manipulations. 
+2. Techniques for temporal manipulations.
+3. Techniques for value manipulations
+
+## Frequency Manipulations {.tabset}
+
+Frequency manipulations rely on the fact that a patient's record has many entries for the same billing code, laboratory test, or medication. You can apply three types of frequency manipulations:
+
+* Count 
+* Weighted Frequency
+* Thresholding
+
+### Count
+This frequency manipulation is simply a raw count of the number of times a particular code, test, or medication appears in the record. Let's try it out for ICD9 code 250.00
+
+```{r}
+diagnoses_icd <- tbl(con, "mimic3_demo.DIAGNOSES_ICD")
+diagnoses_icd %>% 
+  filter(ICD9_CODE == "25000") %>% 
+  group_by(SUBJECT_ID) %>% 
+  summarise(icd_25000_count = n_distinct(ROW_ID)) %>% 
+  arrange(desc(icd_25000_count))
+```
+
+We don't typically use this manipulation in rule-based computational phenotyping algorithms because it doesn't give us a case/control designation, so we can't calculate our two-by-two table. However it is a common in machine-learning generated phenotyping algorithms and clinical prediction algorithms.
+
+#### Try it out for yourself:
+What is the maximum count of blood glucose blood gas lab values a patient has? That is, where the lab value where the `LABEL` is `Glucose`, `FLUID` is `Blood`, and `CATEGORY` is `Blood Gas`?
+
+### Weighted Frequency
+This frequency manipulation is the count of times an element occurred weighted by the total number of occurrence of all measures or all visits. For example, if we want to take a weighted frequency of an ICD9 code, we would take the total count of the ICD9 code and divide it by either: 1) the total number of ICD9 codes in the record, or 2) the total number of visit dates in the record. Let's try it for ICD9 code 250.00.
+
+```{r}
+diagnoses_icd %>% 
+  mutate(icd_25000_counter = case_when(ICD9_CODE == "25000" ~ 1, 
+                                           TRUE ~ 0),
+         icd_total_counter = 1) %>% 
+  group_by(SUBJECT_ID) %>% 
+  summarise(icd_25000_count = sum(icd_25000_counter, na.rm = TRUE),
+            icd_total_count = sum(icd_total_counter, na.rm = TRUE),
+            visit_total_count = n_distinct(HADM_ID)) %>% 
+  mutate(icd_25000_icd_weighted = icd_25000_count/icd_total_count,
+         icd_25000_visit_weighted = icd_25000_count/visit_total_count) %>% 
+  arrange(desc(icd_25000_icd_weighted))
+```
+
+This code has some tricks. The first is that we create two temporary counter variables. The `icd_25000_counter` is set to `1` for all records of the ICD code of interest. The `icd_total_counter` is set to `1` for all ICD records. We can then group the records of each patient by applying the `group_by(SUBJECT_ID)` command. The `summarise()` command will go through each persons record and add up each of the `icd_25000_counter`s and `icd_total_counter`s. It also counts the number of unique `HADM_ID` to count the number of visits the codes were assigned to. The final `mutate()` command weights the `icd_25000_count` variable by either the total ICD code or total visit count.
+
+The interpretation of `icd_25000_icd_weighted` and `icd_25000_visit_weighted` are different:
+
+* icd_25000_icd_weighted
+    * This weighted frequency takes into account both the complexity of the patient's health condition and the number of times they get care. Smaller numbers indicate that this code is a less frequent code compared to all the codes in the patient record. 
+    * For example: Patients who have frequent visits to the doctor will have more codes. Similarly, patients who have many different health conditions will get more codes per visit, increasing their total code count. 
+* icd_25000_visit_weighted
+    * This weighted frequency only takes into account the number of times a patient gets care. Larger numbers mean that this code is used at many-most of the patient visits.
+    * This is a useful technique because it reduces the impact of different care utilization between patients in your dataset. 
+    
+Like with the count manipulation, this technique isn't common in rule-based computational phenotyping algorithms because it doesn't give us a case/control designation and we can't calculate our two-by-two table. However it is a common in machine-learning generated phenotyping algorithms and clinical prediction algorithms.
+
+#### Try it out for yourself:
+What is the maximum count of the ICD code count weighted frequency of ICD9 code 250.60? 
+
+### Thresholding
+This frequency manipulation enforces a minimum number of times a value must occur to count as a case. Typically in computational phenotyping algorithms of a patient's entire record (including inpatient and outpatient visits) we require a minimum count of 3+. For hypothesis generating analyses a minimum count of 2 is sometimes used. Let's try it out for ICD9 code 250.00. Because this data set only has inpatient, icu-based admissions, let's go with the less strict threshold of a minimum count of 2. 
+
+```{r}
+icd_25000_min2 <- diagnoses_icd %>% 
+  mutate(icd_25000_counter = case_when(ICD9_CODE == "25000" ~ 1,
+                                       TRUE ~ 0)) %>% 
+  group_by(SUBJECT_ID) %>% 
+  summarise(icd_25000_count = sum(icd_25000_counter, na.rm = TRUE)) %>% 
+  mutate(icd_25000_min2 = case_when(icd_25000_count >= 2 ~ 1,
+                                    TRUE ~ 0)) %>% 
+  select(SUBJECT_ID, icd_25000_min2)
+
+training %<>% 
+  left_join(icd_25000_min2)
+
+training %>% 
+  collect() %>% 
+  getStats(icd_25000_min2, DIABETES)
+```
+
+This code uses the same counter variable trick we saw in the weighted frequency example, but now we can use the `icd_25000_count` variable in a `mutate()` command that sets `icd_25000_min2` to `1` when the `icd_25000_count` is greater than or equal to 2. 
+
+We can compare this result to when we only required a single code. 
+
+```{r, echo = FALSE}
+icd_25000 <- diagnoses_icd %>% 
+  filter(ICD9_CODE == "25000") %>% 
+  distinct(SUBJECT_ID) %>% 
+  mutate(icd_25000 = 1)
+training %<>% 
+  left_join(icd_25000) %>% 
+  mutate(icd_25000 = coalesce(icd_25000, 0))
+```
+
+Requiring only one or more instances of ICD9 250.00 had a specificity of `r training %>% collect() %>% getStats(icd_25000, DIABETES) %>% broom::tidy() %>% filter(term == "specificity") %>% mutate(estimate_percent = estimate*100) %$% estimate_percent %>% round(digits = 2)`%, and a sensitivity of `r training %>% collect() %>% getStats(icd_25000, DIABETES) %>% broom::tidy() %>% filter(term == "sensitivity") %>% mutate(estimate_percent = estimate*100) %$% estimate_percent %>% round(digits = 2)`%.
+
+When we required two or more instances of ICD9 250.00, the specificity rose to `r training %>% collect() %>% getStats(icd_25000_min2, DIABETES) %>% broom::tidy() %>% filter(term == "specificity") %>% mutate(estimate_percent = estimate*100) %$% estimate_percent %>% round(digits = 2)`%, while sensitivity dropped to a very poor `r training %>% collect() %>% getStats(icd_25000_min2, DIABETES) %>% broom::tidy() %>% filter(term == "sensitivity") %>% mutate(estimate_percent = estimate*100) %$% estimate_percent %>% round(digits = 2)`%. 
+
+This is a common effect of thresholding, and in fact is the primary reason for the existence of the technique. As you have found, some data types have very low specificity. By requiring multiple instances you reduce the likelihood of misclassification due to an error or the diagnostic process. The tradeoff is that the method reduces the sensitivity of any given data type.
+
+#### Try it out for yourself:
+* How many individuals have three or more instances of the blood glucose blood gas lab value? (Where the lab value where the `LABEL` is `Glucose`, `FLUID` is `Blood`, and `CATEGORY` is `Blood Gas`.)
+*  What is the sensitivity, specificity, postive predictive value, and negative predictive value of having three or more instances of the blood glucose blood gas lab value?
+
+
+## Temporal Manipulations {.tabset}
+Temporal manipulations are a method to take the many measurements of an item in a patients record and select a single value for an algorithm. You can apply three types of temporal manipulations:
+
+* First Value 
+* Last Value
+* Relative Timing
+
+### First Value
+In many cases it makes sense to take the earliest value in the patient's record, perhaps I'm trying to group patients based on their health condition when entering my healthcare system. Let's take the patient's first glucose measurement in the record. 
+
+```{r}
+labevents <- tbl(con, "mimic3_demo.LABEVENTS")
+d_labitems <- tbl(con, "mimic3_demo.D_LABITEMS")
+
+labevents %>% 
+  inner_join(d_labitems, by = c("ITEMID" = "ITEMID"), suffix = c("_l","_d")) %>% 
+  filter(LABEL == "Glucose",
+         FLUID == "Blood",
+         CATEGORY == "Blood Gas") %>% 
+  group_by(SUBJECT_ID) %>% 
+  mutate(earliest_glucose_blood_bg = min(CHARTTIME, na.rm = TRUE)) %>% 
+  filter(CHARTTIME == earliest_glucose_blood_bg)
+```
+
+In this code we first filter to lab value we want to use. Then we group each record together with `group_by(SUBJECT_ID)`. We can create a temporary matching variable using `mutate()` that calculates the earliest CHARTTIME in the record, and then only keep those records with the `CHARTTIME` is that earliest measurement.
+
+*Caution: Although MIMIC-III data is pretty clean, in the real world you may actually have multiple measurements with the same minimum charttime. This can because of date-time converstions where you only have the date and all measurements on the same day look the same, or when there were different units, or just simply errors. Always make sure that you have a single measurement after your filter step. If you end up with multiple measurements and can't identify an obvious error, consider applying on of the value manipulations to combine the results*
+
+When we apply this manipulation for computational phenotyping, we typically have to apply a threshold to determine which patients are considered cases or controls using the single first value. Let's use the diagnostic criteria for blood glucose which is a random glucose measurement of 200 mg/dL (11.1 mmol/L) or higher.
+
+```{r}
+glucose_blood_bg_over200_first <- labevents %>% 
+  inner_join(d_labitems, by = c("ITEMID" = "ITEMID"), suffix = c("_l","_d")) %>% 
+  filter(LABEL == "Glucose",
+         FLUID == "Blood",
+         CATEGORY == "Blood Gas") %>% 
+  group_by(SUBJECT_ID) %>% 
+  mutate(earliest_glucose_blood_bg = min(CHARTTIME, na.rm = TRUE)) %>% 
+  filter(CHARTTIME == earliest_glucose_blood_bg) %>% 
+  mutate(glucose_blood_bg_over200_first = case_when(VALUENUM >= 200 ~ 1,
+                                              TRUE ~ 0)) %>% 
+  select(SUBJECT_ID, glucose_blood_bg_over200_first)
+
+training %>% 
+  left_join(glucose_blood_bg_over200_first) %>% 
+  mutate(glucose_blood_bg_over200_first = coalesce(glucose_blood_bg_over200_first, 0)) %>% 
+  collect() %>% 
+  getStats(glucose_blood_bg_over200_first, DIABETES)
+```
+
+We can compare this performance to when we just used any value of the blood glucose blood gas lab measurement. 
+
+```{r, echo = FALSE}
+glucose_blood_bg <- labevents %>% 
+  inner_join(d_labitems, by = c("ITEMID" = "ITEMID"), suffix = c("_l","_d")) %>%
+  filter(LABEL == "Glucose",
+         FLUID == "Blood",
+         CATEGORY == "Blood Gas") %>% 
+  distinct(SUBJECT_ID) %>% 
+  mutate(glucose_blood_bg = 1)
+training %<>% 
+  left_join(glucose_blood_bg) %>% 
+  mutate(glucose_blood_bg = coalesce(glucose_blood_bg, 0))
+training %<>% 
+  left_join(glucose_blood_bg_over200_first) %>% 
+  mutate(glucose_blood_bg_over200_first = coalesce(glucose_blood_bg_over200_first, 0))
+```
+
+Any measurement of the blood glucose blood gas lab measurement, regardless of value, had a specificity of `r training %>% collect() %>% getStats(glucose_blood_bg, DIABETES) %>% broom::tidy() %>% filter(term == "specificity") %>% mutate(estimate_percent = estimate*100) %$% estimate_percent %>% round(digits = 2)`%, and a sensitivity of `r training %>% collect() %>% getStats(glucose_blood_bg, DIABETES) %>% broom::tidy() %>% filter(term == "sensitivity") %>% mutate(estimate_percent = estimate*100) %$% estimate_percent %>% round(digits = 2)`%.
+
+When we required the first measurement of the blood glucose blood gas lab measurement to be 200 mg/dL or higher, the specificity rose to `r training %>% collect() %>% getStats(glucose_blood_bg_over200_first, DIABETES) %>% broom::tidy() %>% filter(term == "specificity") %>% mutate(estimate_percent = estimate*100) %$% estimate_percent %>% round(digits = 2)`%, while sensitivity dropped to a low `r training %>% collect() %>% getStats(glucose_blood_bg_over200_first, DIABETES) %>% broom::tidy() %>% filter(term == "sensitivity") %>% mutate(estimate_percent = estimate*100) %$% estimate_percent %>% round(digits = 2)`%. 
+
+####Try it out for yourself:
+* What is the performance of having the first HbA1C laboratory measurement to be greater than 6.5%? That is, where `LABEL` is `% Hemoglobin A1c`.
+
+
+### Last Value
+We can do the exact same process with the last value in the record. Let's try out when the last value in the record of blood glucose blood gas is 200 mg/dL or higher.
+
+```{r}
+glucose_blood_bg_over200_last <- labevents %>% 
+  inner_join(d_labitems, by = c("ITEMID" = "ITEMID"), suffix = c("_l","_d")) %>% 
+  filter(LABEL == "Glucose",
+         FLUID == "Blood",
+         CATEGORY == "Blood Gas") %>% 
+  group_by(SUBJECT_ID) %>% 
+  mutate(latest_glucose_blood_bg = max(CHARTTIME, na.rm = TRUE)) %>% 
+  filter(CHARTTIME == latest_glucose_blood_bg) %>% 
+  mutate(glucose_blood_bg_over200_last = case_when(VALUENUM >= 200 ~ 1,
+                                                   TRUE ~ 0)) %>% 
+  select(SUBJECT_ID, glucose_blood_bg_over200_last)
+
+training %>% 
+  left_join(glucose_blood_bg_over200_last) %>% 
+  mutate(glucose_blood_bg_over200_last = coalesce(glucose_blood_bg_over200_last, 0)) %>% 
+  collect() %>% 
+  getStats(glucose_blood_bg_over200_last, DIABETES)
+```
+
+We can compare this performance to when we just used any value of the blood glucose blood gas lab measurement. 
+
+```{r, echo = FALSE}
+training %<>% 
+  left_join(glucose_blood_bg_over200_last) %>% 
+  mutate(glucose_blood_bg_over200_last = coalesce(glucose_blood_bg_over200_last, 0))
+```
+
+Any measurement of the blood glucose blood gas lab measurement, regardless of value, had a specificity of `r training %>% collect() %>% getStats(glucose_blood_bg, DIABETES) %>% broom::tidy() %>% filter(term == "specificity") %>% mutate(estimate_percent = estimate*100) %$% estimate_percent %>% round(digits = 2)`%, and a sensitivity of `r training %>% collect() %>% getStats(glucose_blood_bg, DIABETES) %>% broom::tidy() %>% filter(term == "sensitivity") %>% mutate(estimate_percent = estimate*100) %$% estimate_percent %>% round(digits = 2)`%.
+
+When we required the first measurement of the blood glucose blood gas lab measurement be over 200 mg/dL or higher, the specificity rose to `r training %>% collect() %>% getStats(glucose_blood_bg_over200_first, DIABETES) %>% broom::tidy() %>% filter(term == "specificity") %>% mutate(estimate_percent = estimate*100) %$% estimate_percent %>% round(digits = 2)`%, while sensitivity dropped to a low `r training %>% collect() %>% getStats(glucose_blood_bg_over200_first, DIABETES) %>% broom::tidy() %>% filter(term == "sensitivity") %>% mutate(estimate_percent = estimate*100) %$% estimate_percent %>% round(digits = 2)`%. 
+
+Finally we required the last measurement of the blood glucose blood gas lab measurement to be 200 mg/dL or higher, the specificity dropped slightly to `r training %>% collect() %>% getStats(glucose_blood_bg_over200_last, DIABETES) %>% broom::tidy() %>% filter(term == "specificity") %>% mutate(estimate_percent = estimate*100) %$% estimate_percent %>% round(digits = 2)`%, while sensitivity dropped to the an extremely low `r training %>% collect() %>% getStats(glucose_blood_bg_over200_last, DIABETES) %>% broom::tidy() %>% filter(term == "sensitivity") %>% mutate(estimate_percent = estimate*100) %$% estimate_percent %>% round(digits = 2)`%. 
+
+This result makes sense because ideally at the end of their hospital stay we'd expect the patients to have decent glucose control due to close monitoring. So why are there any individuals who's last glucose measurement is so high? Remember that this is a critical care database. In fact all four of the patients who had this measurement died during their hospital stay within hours to days after these measurements were taken. 
+
+####Try it out for yourself:
+* What is the performance of having the last HbA1C laboratory measurement to be greater than 6.5%? That is, where `LABEL` is `% Hemoglobin A1c`.
+
+
+### Relative Timing
+The relative timing frequency manipulation compares one value to another event. For example if we are trying to identify patients who had drug toxicity we may look at the first laboratory value after the first prescription of the drug. While you should understand the concept of this approach, being able to perform this data manipulation is beyond the scope of this course.
+
+## Value Manipulations {.tabset}
+The last type of manipulation you should be familiar with are value manipulations. These manipulations make use of all values in the record, regardless of timing. The value manipulations you should be able to calculate are:
+
+* Minimum
+* Maximum
+* Mean
+* Thresholding
+
+### Minimum
+Let's look how to calculate the minimum value of blood glucose blood gas.
+
+```{r}
+labevents %>% 
+  inner_join(d_labitems, by = c("ITEMID" = "ITEMID"), suffix = c("_l","_d")) %>% 
+  filter(LABEL == "Glucose",
+         FLUID == "Blood",
+         CATEGORY == "Blood Gas") %>% 
+  group_by(SUBJECT_ID) %>% 
+  summarise(glucose_blood_bg_min = min(VALUENUM, na.rm = TRUE))
+```
+
+In this case for each patient we take the minimum value of blood glucose blood gas in the entire record using the `min()` function and `summarise()`.
+
+We can use that value in our algorithm requiring a blood glucose level of at least 200 mg/dL.
+
+```{r}
+min_glucose_blood_bg_over200 <- labevents %>% 
+  inner_join(d_labitems, by = c("ITEMID" = "ITEMID"), suffix = c("_l","_d")) %>% 
+  filter(LABEL == "Glucose",
+         FLUID == "Blood",
+         CATEGORY == "Blood Gas") %>% 
+  group_by(SUBJECT_ID) %>% 
+  summarise(glucose_blood_bg_min = min(VALUENUM, na.rm = TRUE)) %>% 
+  mutate(min_glucose_blood_bg_over200 = case_when(glucose_blood_bg_min >= 200 ~ 1,
+                                                  TRUE ~0)) %>% 
+  select(SUBJECT_ID, min_glucose_blood_bg_over200)
+
+
+training %>% 
+  left_join(min_glucose_blood_bg_over200) %>% 
+  mutate(min_glucose_blood_bg_over200 = coalesce(min_glucose_blood_bg_over200, 0)) %>% 
+  collect() %>% 
+  getStats(min_glucose_blood_bg_over200, DIABETES)
+```
+
+####Try it out for yourself:
+* What is the performance of having the minimum HbA1C laboratory measurement to be greater than 6.5%? That is, where `LABEL` is `% Hemoglobin A1c`.
+
+
+### Maximum
+Now let's try the maximum value of blood glucose blood gas of at least 200 mg/dL.
+
+```{r}
+max_glucose_blood_bg_over200 <- labevents %>% 
+  inner_join(d_labitems, by = c("ITEMID" = "ITEMID"), suffix = c("_l","_d")) %>% 
+  filter(LABEL == "Glucose",
+         FLUID == "Blood",
+         CATEGORY == "Blood Gas") %>% 
+  group_by(SUBJECT_ID) %>% 
+  summarise(glucose_blood_bg_max = max(VALUENUM, na.rm = TRUE)) %>% 
+  mutate(max_glucose_blood_bg_over200 = case_when(glucose_blood_bg_max >= 200 ~ 1,
+                                                  TRUE ~0)) %>% 
+  select(SUBJECT_ID, max_glucose_blood_bg_over200)
+
+
+training %>% 
+  left_join(max_glucose_blood_bg_over200) %>% 
+  mutate(max_glucose_blood_bg_over200 = coalesce(max_glucose_blood_bg_over200, 0)) %>% 
+  collect() %>% 
+  getStats(max_glucose_blood_bg_over200, DIABETES)
+```
+
+####Try it out for yourself:
+* What is the performance of having the maximum HbA1C laboratory measurement to be greater than 6.5%? That is, where `LABEL` is `% Hemoglobin A1c`.
+
+
+### Mean
+Now let's try the mean value of blood glucose blood gas of at least 200 mg/dL.
+
+```{r}
+mean_glucose_blood_bg_over200 <- labevents %>% 
+  inner_join(d_labitems, by = c("ITEMID" = "ITEMID"), suffix = c("_l","_d")) %>% 
+  filter(LABEL == "Glucose",
+         FLUID == "Blood",
+         CATEGORY == "Blood Gas") %>% 
+  group_by(SUBJECT_ID) %>% 
+  summarise(glucose_blood_bg_mean = mean(VALUENUM, na.rm = TRUE)) %>% 
+  mutate(mean_glucose_blood_bg_over200 = case_when(glucose_blood_bg_mean >= 200 ~ 1,
+                                                  TRUE ~0)) %>% 
+  select(SUBJECT_ID, mean_glucose_blood_bg_over200)
+
+
+training %>% 
+  left_join(mean_glucose_blood_bg_over200) %>% 
+  mutate(mean_glucose_blood_bg_over200 = coalesce(mean_glucose_blood_bg_over200, 0)) %>% 
+  collect() %>% 
+  getStats(mean_glucose_blood_bg_over200, DIABETES)
+```
+
+####Try it out for yourself:
+* What is the performance of having the mean HbA1C laboratory measurement to be greater than 6.5%? That is, where `LABEL` is `% Hemoglobin A1c`.
+
+
+### Thresholding
+Thresholding is a method that puts some threshold like a blood glucose blood gas of at least 200 mg/dL, and as long as one or more lab measurements in a patients record meets that threshold, then the patient is considered a case.
+
+```{r}
+any_glucose_blood_bg_over200 <- labevents %>% 
+  inner_join(d_labitems, by = c("ITEMID" = "ITEMID"), suffix = c("_l","_d")) %>% 
+  filter(LABEL == "Glucose",
+         FLUID == "Blood",
+         CATEGORY == "Blood Gas") %>% 
+  group_by(SUBJECT_ID) %>% 
+  mutate(glucose_blood_bg_over200_marker = case_when(VALUENUM >= 200 ~ 1,
+                                                     TRUE ~0)) %>% 
+  summarise(any_glucose_blood_bg_over200 = max(glucose_blood_bg_over200_marker)) %>% 
+  select(SUBJECT_ID, any_glucose_blood_bg_over200)
+
+
+training %>% 
+  left_join(any_glucose_blood_bg_over200) %>% 
+  mutate(any_glucose_blood_bg_over200 = coalesce(any_glucose_blood_bg_over200, 0)) %>% 
+  collect() %>% 
+  getStats(any_glucose_blood_bg_over200, DIABETES)
+```
+
+In this code we create a marker variable `glucose_blood_bg_over200_marker` that is set equal to `1` for all blood glucose values over 200 mg/dL. Then we `summarise()` and take the maximum value of that marker (which is 1 if any of the measurements meet the threshold).
+
+####Try it out for yourself:
+* What is the performance of having any HbA1C laboratory measurement to be greater than 6.5%? That is, where `LABEL` is `% Hemoglobin A1c`.
