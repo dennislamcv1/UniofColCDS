@@ -1,0 +1,338 @@
+---
+title: "Regular Expressions and Text Processing in R"
+author: "Laura K. Wiley, PhD"
+output:
+  html_document:
+    df_print: paged
+    theme: paper
+  html_notebook: null
+editor_options:
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE)
+library(DT)
+
+## This is a helper function to pretty print the dataset. 
+##### The escape argument allows the html newline (</br>) to show up as a newline
+##### The rownames column suppresses the basic DT rowline number (which is the same as the NOTE_ID in this case)
+##### The options set the page length to display two notes, and allow for searches with highlighting.
+##### The last option "columnDefs" is a function that takes the text column and essentially replaces newline characters with the html code for a newline (</br>)
+##### 
+nlp_example_datatable <- function(dataset){
+  dataset %>% 
+      datatable(escape = FALSE,
+                rownames = FALSE,
+                options = list(ordering = FALSE,
+                               scrollY = "500px",
+                               scrollCollapse = TRUE,
+                               paging = FALSE,
+                               searchHighlight = TRUE,
+                               columnDefs = list(list(targets = 1,
+                                                      render = JS("function(data, type, row, meta){",
+                                                                  "return data.split('\\n\\n').join('<br/><br/>');",
+                                                                  "}")))))
+}
+
+nlp_example_doublecol_datatable <- function(dataset){
+  dataset %>% 
+      datatable(escape = FALSE,
+                rownames = FALSE,
+                options = list(ordering = FALSE,
+                               scrollY = "500px",
+                               scrollCollapse = TRUE,
+                               paging = FALSE,
+                               searchHighlight = TRUE,
+                               columnDefs = list(list(targets = 1:2,
+                                                      render = JS("function(data, type, row, meta){",
+                                                                  "return data.split('\\n\\n').join('<br/><br/>');",
+                                                                  "}")))))
+}
+```
+
+<br>
+Welcome to the first coding example of Clinical Natural Language Processing, the fourth course in the Coursera Clinical Data Science Specialization created by the University of Colorado Anschutz Medical Campus and supported by our industry partner Google Cloud. 
+
+This week we will be covering how to build regular expressions and how to work with text in the tidyverse. In these examples, we will use clinical notes created by medical transcriptionists that are freely available from www.MTSamples.com. Although these notes were created as training examples rather than notes for real patients, I can confidently say that these notes are very realistic to what you will see as a clinical data scientist. In some cases we have edited the text slightly to provide you with 1) additional messiness common in provider created notes and 2) specific examples of negation and other false positives to demonstrate real-life text processing challenges. There are three data sets available on Google BigQuery for this course, all of which are stored in `course4_data`:
+
+* `radiology_reports` - This is a set of 11 radiology reports from abdominal CT scans. This will be the primary data set used in these worked examples.
+* `discharge_summaries` - This is a set of 15 discharge summaries that will be used for the "Try it out for yourself:" practice problems.
+* `diabetes_historyandphysical` - This is a set of >100 notes that you will be using for the course Practical Application project in Week 5.
+
+# Getting Started 
+
+First, let's set up our environment. We need three packages:
+
+* `tidyverse` - group of packages for data wrangling and visualization - this automatically loads the text processing package `stringr`
+* `magrittr` - package for piping data analysis chains
+* `bigrquery` - package for connecting to bigquery database
+
+We also set up our connection to the Google BigQuery project to be able to access the data used in this course. If you aren't familiar with these packages I highly recommend working through the R programming section of "Introduction to Clinical Data Science", the first course in the Coursera Clinical Data Science Specialization.
+
+```{r, message=FALSE, results='hide'}
+library(tidyverse)
+library(magrittr)
+library(bigrquery)
+
+con <- DBI::dbConnect(drv = bigquery(),
+                      project = "learnclinicaldatascience")
+radiology_reports <- tbl(con, "course4_data.radiology_reports") %>% 
+  collect()
+```
+
+# {#top-link}
+# Programming Examples {.tabset}
+This next section of the reading is split into two parts:
+
+1. Techniques for creating regular expressions. 
+2. Techniques for working with strings using the `stringr` package.
+
+## Creating Regular Expressions 
+
+As you saw in the video ["Introduction to Regular Expressions"](https://www.coursera.org/learn/clinical-natural-language-processing/lecture/JJnlb/introduction-to-regular-expressions), regular expressions can be complex. While I was creating this course I spent a lot of time trying find examples of how others have taught this subject to identify best practices. However even after a lot of searching I didn't find a lot of resources beyond what we have already shown you in the video like the tools [RegExr](regexr.com) and [Debuggex](www.debuggex.com). Even trying to remember how I learned regular expressions I really learned through trial and error with data that I needed to analyze. With that in mind, I'm going to walk you through how I created the example used in the video and then give you some text to part with your own regular expressions. Don't worry if it takes you time - that is completely normal! This is a skill I've developed over almost a decade and I still have to have Stack Overflow open when I'm really writing complex regular expressions!
+
+As a reminder - here is the regular expression used in the example video:
+
+> physical exam(ination)?( (up)?on admission)?:
+
+So how did I create that regular expression? Well I was working to process note sections and kept finding variations on how providers labeled the physical exam section. To make this example easier to follow - here is the final list of the headers that I needed to match:
+
+```{r, echo = FALSE}
+physical_exam_headers <- tibble(header = c("Physical Exam:", "Physical examination:", "Physical Exam upon Admission:","Physical exam on admission:", "Physical examination upon admission:", "Physical Examination on Admission:"))
+
+physical_exam_headers %>% 
+  datatable(., options = list(ordering=F, paging = F, searching=F, bLengthChange = F, bInfo = F), rownames= FALSE, colnames = "")
+```
+
+When I first started I wrote a regular expression to capture the first option: "Physical Exam". When I'm writing regular expressions I like to create a second column that shows what my regular expression is matching. 
+
+```{r, eval = FALSE}
+physical_exam_headers %>% 
+  mutate(regex_test = str_extract(header, regex("physical exam:", ignore_case = TRUE)))
+```
+
+```{r, echo = FALSE}
+physical_exam_headers %>% 
+  mutate(regex_test = str_extract(header, regex("physical exam:", ignore_case = TRUE))) %>% 
+  datatable(., options = list(ordering=F, paging = F, searching=F, bLengthChange = F, bInfo = F), rownames= FALSE)
+```
+
+In this example I am using the `regex()` function so that I can make my regular expression case insensitive with the `ignore_case` flag. Now that we got the first one, let's try to capture the second option - "Physical examination" - we can just add "ination" as an optional group that can be matched 0 or 1 times.
+
+```{r, eval = FALSE}
+physical_exam_headers %>% 
+  mutate(regex_test = str_extract(header, regex("physical exam(ination)?:", ignore_case = TRUE)))
+```
+
+```{r, echo = FALSE}
+physical_exam_headers %>% 
+  mutate(regex_test = str_extract(header, regex("physical exam(ination)?:", ignore_case = TRUE))) %>% 
+  datatable(., options = list(ordering=F, paging = F, searching=F, bLengthChange = F, bInfo = F), rownames= FALSE)
+```
+
+Awesome! Let's try the third example - now we want to be able to also match the optional "upon admission".
+
+```{r, eval = FALSE}
+physical_exam_headers %>% 
+  mutate(regex_test = str_extract(header, regex("physical exam(ination)?( upon admission)?:", ignore_case = TRUE)))
+```
+
+```{r, echo = FALSE}
+physical_exam_headers %>% 
+  mutate(regex_test = str_extract(header, regex("physical exam(ination)?( upon admission)?:", ignore_case = TRUE))) %>% 
+  datatable(., options = list(ordering=F, paging = F, searching=F, bLengthChange = F, bInfo = F), rownames= FALSE)
+```
+
+Woah! We actually also matched the option "physical examination upon admission" - excellent! Looking at the last two strings we need to match the only difference is that they use "on" instead of "upon". We can simply make the "up" part of "upon" optional and it should match.
+
+```{r, eval = FALSE}
+physical_exam_headers %>% 
+  mutate(regex_test = str_extract(header, regex("physical exam(ination)?( (up)?on admission)?:", ignore_case = TRUE)))
+```
+
+```{r, echo = FALSE}
+physical_exam_headers %>% 
+  mutate(regex_test = str_extract(header, regex("physical exam(ination)?( (up)?on admission)?:", ignore_case = TRUE))) %>% 
+  datatable(., options = list(ordering=F, paging = F, searching=F, bLengthChange = F, bInfo = F), rownames= FALSE)
+```
+
+And that's that - we've matched all of the headers! Remember that you can also use the debuggex diagram to understand this regular expression if you ever need to come back and understand the regular expression.
+
+<center><img src="https://raw.githubusercontent.com/thewileylab/ClinicalDataScienceSpecialization/master/Images/debuggex_physicalexam_example.png"></center>
+
+#### Try it out for yourself:
+
+* Write a regular expression that matches all of the following headers:
+```{r, echo = FALSE}
+medication_headers <- tibble(header = c("MEDICATIONS ON ADMISSION:", "Medications on Admission:", 
+"MEDICATIONS:", "Medications:", "medications:", "ADMISSION MEDICATIONS:", 
+"CURRENT MEDICATIONS:", "Medication:", "medication:", "MEDICATION:", 
+"CURRENT MEDICATION ON ADMISSION:", "ADMISSION MEDICATION:", 
+"Current medications:", "MEDICATION ON ADMISSION:"))
+
+medication_headers %>% 
+  datatable(., options = list(ordering=F, paging = F, searching=F, bLengthChange = F, bInfo = F), rownames= FALSE, colnames = "")
+```
+
+To make your life a bit easier - you can use this data frame as you are writing, or you can just copy paste this list into [RegExr](regexr.com) or [Debuggex](www.debuggex.com).
+
+```{r, eval = FALSE}
+medication_headers <- tibble(header = c("MEDICATIONS ON ADMISSION:", "Medications on Admission:", 
+"MEDICATIONS:", "Medications:", "medications:", "ADMISSION MEDICATIONS:", 
+"CURRENT MEDICATIONS:", "Medication:", "medication:", "MEDICATION:", 
+"CURRENT MEDICATION ON ADMISSION:", "ADMISSION MEDICATION:", 
+"Current medications:", "MEDICATION ON ADMISSION:"))
+```
+
+* Using the radiology reports in Google BigQuery try to create a regular expression that matches only "cyst" or "cystic". What are two words that are potential mismatches for simple searches for cyst and cystic?
+
+[Return to Top](#top-link)
+
+## Using the `stringr` package {.tabset}
+
+We will examine the functions in the `stringr` package with the radiology reports available on Google BigQuery.
+
+```{r, eval=FALSE}
+radiology_reports
+```
+
+```{r, echo = FALSE}
+radiology_reports %>% 
+  nlp_example_datatable()
+```
+
+`stringr` has a number of very helpful functions for text processing, but for the purposes of this course you really only need to understand the functions related to:
+
+* Detection - Is this string/regular expression in the text?
+* Extraction - I need to take the text that matches my regular expression and do something else with it.
+* Replacement - I need to replace the text that matches my regular expression with a different text string.
+
+### Detection
+
+As we work with the radiology reports in future programming examples we are going to focus on methods for determining if any cysts were found during the abdominal CT scan. An important step will be to see which notes have the presence of the word "cyst", "cysts", or similar words like "cystic".
+
+The `stringr` function `str_detect()` looks at text and returns `TRUE` if the regular expression is found in the text, and `FALSE` if it is not found.
+
+Let's try it out! In this example I will make a new column `cyst_found` that holds the result of the `str_detect()` function.
+
+```{r, eval=FALSE}
+radiology_reports %>% 
+  mutate(cyst_found = str_detect(string = TEXT, pattern = regex("(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", ignore_case = TRUE))) 
+```
+
+```{r, echo=FALSE}
+radiology_reports %>% 
+  mutate(cyst_found = str_detect(string = TEXT, pattern = regex("(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", ignore_case = TRUE))) %>% 
+  nlp_example_datatable()
+```
+
+To make sure that this worked - try searching for "cyst" in the search box - it will highlight all the simple matches for those four letters - you can see that this regular expression doesn't match the couple of decoy words in Notes 1, 8, and 11.
+
+You may wonder what this regular expression is actually doing as it is a bit more complex than some of the ones we've used before. Here is the Debuggex diagram of the regex:
+
+<center><img src="https://raw.githubusercontent.com/thewileylab/ClinicalDataScienceSpecialization/master/Images/debuggex_cystic_example.png"></center>
+
+
+The two groups before and after `cyst(ic)?` are what are called look-behind and look-ahead groups. They make sure that the particular terms are not present before or after the regular expression of interest, but they don't actually match that part of the text. Creating your own look-behind and look-ahead regular expressions is a bit more advanced than required for this course - but they are very helpful when you move on to more advanced regular expressions.
+
+From this analysis you can see 5 notes had the word "cyst" or "cystic" in them. If you wanted to only select notes that had the term, you can use the `str_detect()` command as part of a filter statement:
+
+```{r, eval=FALSE}
+radiology_reports %>% 
+  filter(str_detect(string = TEXT, pattern = regex("(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", ignore_case = TRUE))) 
+```
+
+```{r, echo=FALSE}
+radiology_reports %>% 
+  filter(str_detect(string = TEXT, pattern = regex("(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", ignore_case = TRUE))) %>% 
+  nlp_example_datatable()
+```
+
+Or, if you only want those that don't have the word/s:
+
+```{r, eval=FALSE}
+radiology_reports %>% 
+  filter(!str_detect(string = TEXT, pattern = regex("(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", ignore_case = TRUE)))
+```
+
+```{r, echo=FALSE}
+radiology_reports %>% 
+  filter(!str_detect(string = TEXT, pattern = regex("(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", ignore_case = TRUE))) %>% 
+  nlp_example_datatable()
+```
+
+#### Try it out for yourself:
+* Using the radiology reports in Google BigQuery, how many notes have the words diverticula, diverticulitis, or diverticulosis?
+* Using the discharge summary notes in Google BigQuery `course4_data.discharge_summaries`, how many notes have the word hypertension in them? Blood pressure? 
+
+[Return to Top](#top-link)
+
+### Extraction
+
+If instead of just identifying whether the text existed in the note, we can also extract all the text matches that match our regular expressions using the `str_extract()` function in `stringr`. Let's say we wanted to know whether the note used cyst or cystic - let's make a new column `cyst_value` that has the string text that matched the regular expression:
+
+```{r, eval = FALSE}
+radiology_reports %>% 
+  mutate(cyst_value = str_extract(string = TEXT, pattern = regex("(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", ignore_case = TRUE)))
+```
+
+```{r, echo = FALSE}
+radiology_reports %>% 
+  mutate(cyst_value = str_extract(string = TEXT, pattern = regex("(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", ignore_case = TRUE))) %>% 
+  nlp_example_datatable()
+```
+
+You can again confirm that this is correct by just searching for the term "cyst" in the Search box and compare the highlighted result to the term in `cyst_value`. 
+
+When you do this you may notice that in fact some notes have the term "cyst" used multiple times. The `str_extract()` function only extracts the first match found in the note. If you want to extract all matches in the note you can use the `str_extract_all()` function. This will return a comma-delimited list of all matches found.
+
+```{r, eval = FALSE}
+radiology_reports %>% 
+  mutate(cyst_all_values = str_extract_all(string = TEXT, pattern = regex("(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", ignore_case = TRUE)))
+```
+
+```{r, echo = FALSE}
+radiology_reports %>% 
+  mutate(cyst_all_values = str_extract_all(string = TEXT, pattern = regex("(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", ignore_case = TRUE))) %>% 
+  nlp_example_datatable()
+```
+
+
+#### Try it out for yourself:
+
+* Using the radiology reports in Google BigQuery, what is the maximum number of uses of the word diverticula, diverticulitis, or diverticulosis in a single note?
+* Using the discharge summary notes in Google BigQuery `course4_data.discharge_summaries`, what is the maximum number of uses of the word hypertension in a single note? How about blood pressure? 
+
+[Return to Top](#top-link)
+
+### Replacement
+
+Finally, the last function that we will use in this course is `str_replace()`. This function let's you replace any matching string with a string of your choice. This is particularly useful as you are cleaning text to make them more uniform for your regular expressions.
+
+For example, in the radiology reports, it's often useful to know why the imaging was performed. If you read the radiology reports in this course, you can see that this information is actually labeled with a couple of different terms depending upon each note. 
+
+Note 1 uses "REASON FOR EXAM:", Note 2 uses "CLINICAL INDICATION:", Note 3 uses "HISTORY:", and Note 11 uses "INDICATIONS:" Of these, "REASON FOR EXAM:" is used most frequently. As we try to parse note sections in next week's material, it would be much easier if these all had the same label. We can use `str_replace()` to relabel each of these sections with "REASON FOR EXAM:".
+
+```{r, eval = FALSE}
+radiology_reports %>% 
+  mutate(renamed_section = str_replace(string = TEXT, 
+                                       pattern = regex("(history:)|(clinical )?indications?:", ignore_case = TRUE), 
+                                       replacement = "REASON FOR EXAM:"))
+```
+
+```{r, echo = FALSE}
+radiology_reports %>% 
+  mutate(renamed_section = str_replace(string = TEXT, 
+                                       pattern = regex("(history:)|(clinical )?indications?:", ignore_case = TRUE), 
+                                       replacement = "REASON FOR EXAM:")) %>% 
+  nlp_example_doublecol_datatable()
+```
+
+
+#### Try it out for yourself:
+
+* Using the radiology reports in Google BigQuery, replace the headers used in Note 1 that have an extra space at the beginning of the line ("COMPARISON:", "TECHNIQUE", "CT ABDOMEN:", and "CT PELVIS:"), with the same headers without the space.
+* Using the discharge summary notes in Google BigQuery `course4_data.discharge_summaries`, replace the section headers "CLINCAL RESUME:", "CURRENT HISTORY:", "BRIEF HISTORY:", "HISTORY AND PHYSICAL:", and "BRIEF HISTORY AND PHYSICAL:" with "HISTORY OF PRESENT ILLNESS:"
+
+[Return to Top](#top-link)
