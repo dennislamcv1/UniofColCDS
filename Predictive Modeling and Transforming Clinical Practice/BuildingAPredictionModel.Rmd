@@ -1,0 +1,1086 @@
+---
+title: "Building a Clinical Prediction Model"
+author: "David Mayer, Melissa P. Wilson, MS, Laura K. Wiley, PhD"
+output:
+  html_document:
+    df_print: paged
+    theme: paper
+  html_notebook: null
+editor_options:
+  chunk_output_type: console
+---
+
+<style>
+  .coding-explanation {
+    background-color: #FDF9E4;
+    padding: 10px;
+    border: 1px solid;
+    border-color: #F7EBCF;
+    margin-left: 50px;
+    margin-right: 50px;
+    border-radius: 5px;
+    color: #866E42;}
+</style>
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE)
+library(DT)
+
+predmodel_datatable <- function(dataset){
+  dataset %>% 
+      datatable(escape = FALSE,
+                rownames = FALSE,
+                options = list(dom = 'ltipr',
+                               ordering = FALSE,
+                               scrollY = "200px",
+                               scrollX = TRUE,
+                               scrollCollapse = TRUE,
+                               paging = FALSE,
+                               searchHighlight = TRUE))
+}
+```
+
+
+<br>
+This programming reading is provided as part of week four of "Predictive Modeling and Transforming Clinical Practice", the fifth course in the Coursera Clinical Data Science Specialization created by the University of Colorado Anschutz Medical Campus and supported by our industry partner Google Cloud. 
+
+Over the past three weeks, you have learned about the importance of understanding the context of what problem your prediction model is designed to solve as well as where and how you plan to implement your model. This week we are focusing on learning the basics of building and evaluating a clinical prediction model. Importantly, building high quality models requires _significant_ training/expertise in statistics and potentially computer science. This tutorial is *not* meant to provide that level of training. It is only meant to give you some practical experience in the types of data manipulations and decisions that go into building prediction models in practice. 
+
+If you are a beginner and very interested in this topic, Coursera has a number of _excellent_ courses and specializations on predictive modeling where you can learn skills and best practices in this area.
+
+If you are already an experienced data modeler this tutorial will still have value for you to consider some of the modeling challenges inherent in using clinical data. That said, please know that the examples are deliberately simplified for education to demonstrate a few key lessons - not modeling best practices. Thank you for your understanding!
+
+# Getting Started 
+
+First, let's set up our environment. We need three packages:
+
+* `tidyverse` - group of packages for data wrangling and visualization - this automatically loads the text processing package `stringr`
+* `magrittr` - package for piping data analysis chains
+* `bigrquery` - package for connecting to BigQuery database
+
+We also set up our connection to the Google BigQuery project to be able to access the data used in this course.  If you aren't familiar with these packages I highly recommend working through the R programming section of "Introduction to Clinical Data Science", the first course in the Coursera Clinical Data Science Specialization. 
+
+You may notice that we are collecting all table data into R in this programming assignment. Although there are more tools being developed in R for high-throughput data analysis, in these simplified examples it is easier if we work with all in-memory data rather than database connections. As you work through "Try it out for yourself" and quiz problems, make sure you collect the data before passing to the different modeling functions. 
+
+```{r, message=FALSE, results='hide', warning=FALSE}
+library(tidyverse)
+library(bigrquery)
+
+con <- DBI::dbConnect(drv = bigquery(),
+                      project = "learnclinicaldatascience")
+
+admissions <- tbl(con, 'mimic3_demo.ADMISSIONS') %>% 
+  collect()
+patients <- tbl(con, 'mimic3_demo.PATIENTS') %>% 
+  collect()
+icustays <- tbl(con, "mimic3_demo.ICUSTAYS") %>% 
+  collect()
+diagnoses_icd <- tbl(con, "mimic3_demo.DIAGNOSES_ICD") %>% 
+  collect()
+chartevents <- tbl(con, "mimic3_demo.CHARTEVENTS") %>% 
+  collect()
+d_items <- tbl(con, "mimic3_demo.D_ITEMS") %>% 
+  collect()
+```
+
+# {#top-link}
+# Programming Examples {.tabset}
+
+Our goal in this programming assignment is to build a model that predicts the likelihood that a patient will stay longer than than the ICU average stay of 4 days. 
+
+For this simplified example we are going to work through three different stages of predictive modeling:
+
+1. Building an Analytic data set
+2. Developing the Predictive Model
+3. Evaluating the Model
+
+Throughout this assignment we have to make a number of decisions about how to format and model our data. I want you to be thinking through the impact each of those decisions have on 1) which patients this model will and will not be valid, and 2) which clinical/operational/financial functions this model will and will not be valid.
+
+## Build Analytic Data Set {.tabset}
+
+The first step in a prediction modeling project is to build an analytic data set that includes all the patients (e.g., Population) and data (e.g., Outcome and Predictors) you want to use in your model. Especially in longitudinal data sources like clinical data there are a number of choices that you have to make when building this data set that will affect the validity and utility of your clinical prediction model. 
+
+### Define the Population
+
+The first step in building an analytic data set is defining the population. In this case we want to build a prediction model for which ICU patients will stay for a longer than average time. So the first step in the process is to filter to those patients who have an ICU stay. ICU stay information is available in the ICU_STAYS table. Let's start by looking at this table in more detail.
+
+```{r, eval = FALSE}
+icustays
+```
+
+```{r, echo = FALSE}
+icustays %>% 
+  predmodel_datatable()
+```
+
+The first thing I notice looking at this table is that there are 136 entries, but I know that our data set only contains 100 patients. That must mean that some patients have multiple ICU stays - let's check it out.
+
+```{r, eval = FALSE}
+icustays %>% 
+  count(SUBJECT_ID, sort = TRUE)
+```
+
+```{r, echo = FALSE}
+icustays %>% 
+  count(SUBJECT_ID, sort = TRUE) %>% 
+  predmodel_datatable()
+```
+
+Wow - that first patient had a lot of ICU stays! Let's take a look at this patient in more detail. 
+
+```{r, eval = FALSE}
+icustays %>% 
+  filter(SUBJECT_ID == 41976) %>% 
+  arrange(SUBJECT_ID, HADM_ID, ICUSTAY_ID)
+```
+
+```{r, echo = FALSE}
+icustays %>% 
+  filter(SUBJECT_ID == 41976) %>% 
+  arrange(SUBJECT_ID, HADM_ID, ICUSTAY_ID) %>% 
+  predmodel_datatable()
+```
+It appears that they had 15 different hospitalizations - each with a single ICU stay. I wonder if that's common or it some patients actually might have multiple ICU stays during a single hospitalization?
+
+```{r, eval = FALSE}
+icustays %>% 
+  count(SUBJECT_ID, HADM_ID, sort = TRUE)
+```
+
+```{r, echo = FALSE}
+icustays %>% 
+  count(SUBJECT_ID, HADM_ID, sort = TRUE) %>% 
+  predmodel_datatable()
+```
+
+Interesting, there are a handful that have multiple ICU stays during a single hospitalization. 
+
+Based on this quick exploration, we have defined that patients have:
+
+* multiple ICU stays
+* multiple hospitalizations
+* multiple ICU stays per hospitalization
+
+At this point we need to make a couple of decisions on how to handle these multiple hospital and ICU stays. We could:
+
+1. Include every single ICU stay ever, even though the same patient will be represented multiple times
+2. Only include a single ICU visit per hospitalization, even though those patients with multiple hospitalizations will be represented multiple times. 
+3. Only include a single ICU stay from a single hospitalization for each patient - this means each patient only contributes a single set of data points. 
+
+For the latter two methods we would also need to decide which hospitalization and/or ICU stay to select. None of these choices are necessarily _right_ or necessarily _wrong_, but they will affect the meaning and utility of the model we select. 
+
+For this example let us decide that we only want a patient to be represented once in our data set - so we must select only a single ICU stay from a single hospitalization. Again, for simplicity let's go with the first ICU stay of the first hospitalization.
+
+To begin, we will start by creating a new data frame, `first_hospitalization` that contains just the `SUBJECT_ID` and `HADM_ID` (hospitalization identifier) for the first stay for each patient. This new data frame should have 100 rows.
+
+```{r, eval = FALSE}
+first_hospitalization <- admissions %>% 
+  group_by(SUBJECT_ID) %>% 
+  filter(ADMITTIME == min(ADMITTIME)) %>% 
+  ungroup() %>% 
+  select(SUBJECT_ID, HADM_ID)
+
+first_hospitalization %>% 
+  count()
+```
+
+```{r, echo = FALSE}
+first_hospitalization <- admissions %>% 
+  group_by(SUBJECT_ID) %>% 
+  filter(ADMITTIME == min(ADMITTIME)) %>% 
+  ungroup() %>% 
+  select(SUBJECT_ID, HADM_ID)
+
+first_hospitalization %>% 
+  count() %>% 
+  predmodel_datatable()
+```
+
+Now let's take use that data to filter the `icustays` table to just those that are for the first hospitalization and select the earliest ICU stay. Again, this should leave us with 100 people in the new data frame. 
+
+```{r, eval = FALSE}
+analytic_dataset <- icustays %>% 
+  inner_join(first_hospitalization, by = c("SUBJECT_ID" = "SUBJECT_ID", "HADM_ID" = "HADM_ID")) %>% 
+  group_by(SUBJECT_ID, HADM_ID) %>% 
+  filter(INTIME == min(INTIME)) %>% 
+  ungroup() %>% 
+  select(SUBJECT_ID, HADM_ID, ICUSTAY_ID)
+
+analytic_dataset %>% 
+  count()
+```
+
+```{r, echo = FALSE}
+analytic_dataset <- icustays %>% 
+  inner_join(first_hospitalization, by = c("SUBJECT_ID" = "SUBJECT_ID", "HADM_ID" = "HADM_ID")) %>% 
+  group_by(SUBJECT_ID, HADM_ID) %>% 
+  filter(INTIME == min(INTIME)) %>% 
+  ungroup() %>% 
+  select(SUBJECT_ID, HADM_ID, ICUSTAY_ID)
+
+analytic_dataset %>% 
+  count() %>% 
+  predmodel_datatable()
+```
+
+This data frame, `analytic_dataset`, will serve as the base for the analytic data set that we are creating. Let's get started by defining our Outcome!
+
+#### Try it out for yourself:
+* Try selecting the last ICU stay for a patient - how many patients have a different ICU stay selected?
+* What about if you selected the last ICU stay for the last hospitalization? Now how many patients have a different ICU stay selected?
+* By only including the first ICU stay of the first hospitalization when building our model, for which set of patients and under which circumstances could we expect our model to under perform? Warning, this question will be answered in future parts of this programming assignment, make sure to think about it now if you want to practice on your own. 
+
+[Return to Top](#top-link)
+
+### Define the Outcome
+
+Now that we know who is in our data set (`analytic_dataset`) we can add in the value for our desired outcome. Remember that we want to build a model that predicts the likelihood that a patient will stay longer than the ICU average stay of 4 days. 
+
+The first question is where can we find the length of stay for any individual ICU stay. Well it turns out that within the `ICUSTAYS` table there is a column is labeled `LOS` that according to the [MIMIC-III documentation](https://mimic.physionet.org/mimictables/icustays/) is a fractional length of time spent in the ICU. 
+
+Let's build a temporary table that includes the `SUBJECT_ID`, `HADM_ID`, and `ICUSTAY_ID` so that we can ultimately combine it with our `analytic_dataset`. 
+
+```{r, eval = FALSE}
+length_of_stay <- icustays %>% 
+  select(SUBJECT_ID, HADM_ID, ICUSTAY_ID, LOS)
+length_of_stay
+```
+
+```{r, echo = FALSE}
+length_of_stay <- icustays %>% 
+  select(SUBJECT_ID, HADM_ID, ICUSTAY_ID, LOS)
+length_of_stay %>% 
+  predmodel_datatable()
+```
+
+Now, we don't want to use the actual length of stay itself, instead we want to create a binary variable (e.g., 1/0) that equals 1 if the patient has a length of stay longer than the average of 4 days, and 0 if their stay is less than 4 days. 
+
+```{r, eval = FALSE}
+length_of_stay %>% 
+  mutate(los_outcome = case_when(LOS > 4 ~ 1,
+                                 TRUE ~ 0))
+```
+
+```{r, echo = FALSE}
+length_of_stay %>% 
+  mutate(los_outcome = case_when(LOS > 4 ~ 1,
+                                 TRUE ~ 0)) %>% 
+  predmodel_datatable()
+```
+
+Looks good to me! Let's save this transformation and update the data frame. 
+
+```{r, eval = FALSE}
+length_of_stay <- length_of_stay %>% 
+  mutate(los_outcome = case_when(LOS > 4 ~ 1,
+                                 TRUE ~ 0)) %>% 
+  select(SUBJECT_ID, HADM_ID, ICUSTAY_ID, los_outcome)
+length_of_stay 
+```
+
+```{r, echo = FALSE}
+length_of_stay <- length_of_stay %>% 
+  mutate(los_outcome = case_when(LOS > 4 ~ 1,
+                                 TRUE ~ 0)) %>% 
+  select(SUBJECT_ID, HADM_ID, ICUSTAY_ID, los_outcome)
+length_of_stay %>% 
+  predmodel_datatable()
+```
+
+And now we can add this column to the `analytic_dataset` data frame!
+
+```{r, eval = FALSE}
+analytic_dataset %>% 
+  left_join(length_of_stay) 
+```
+
+```{r, echo = FALSE}
+analytic_dataset %>% 
+  left_join(length_of_stay) %>% 
+  predmodel_datatable()
+```
+
+There are two important coding principles we want to use with this approach to creating an analytic data set:
+
+* First, I am using a `left_join()` to combine the new data onto the population list. This is because some variables may not always be available for every patient and I want to make sure they don't get removed from the data set. The `left_join()` keeps all rows from the first data frame and if they are missing in the second data frame, then an `NA` is inserted for the joined variables. 
+* Second, after each join we want to do a couple of quick data quality checks to make sure that our manipulations didn't cause any unexpected changes. We want to check 1) the total number of rows in the data frame which should stay at 100 - one for each individual in our analysis, and 2) the total number of unique `SUBJECT_ID`s just to make sure that there really are 100 distinct records. 
+
+```{r, eval = FALSE}
+analytic_dataset %>% 
+  left_join(length_of_stay) %>% 
+  summarise(count_rows = n(), count_patients = n_distinct(SUBJECT_ID)) 
+```
+
+```{r, echo = FALSE}
+analytic_dataset %>% 
+  left_join(length_of_stay) %>% 
+  summarise(count_rows = n(), count_patients = n_distinct(SUBJECT_ID)) %>% 
+  predmodel_datatable()
+```
+
+This all looks good! Let's go ahead and make the changes final and saved back in to the `analytic_dataset` variable.
+
+```{r, eval = FALSE}
+analytic_dataset <- analytic_dataset %>% 
+  left_join(length_of_stay)
+
+analytic_dataset 
+```
+
+```{r, echo = FALSE}
+analytic_dataset <- analytic_dataset %>% 
+  left_join(length_of_stay)
+analytic_dataset %>% 
+  predmodel_datatable()
+```
+
+#### Try it out for yourself:
+* What if we instead wanted to analyze death during the hospitalization? Use the data dictionary available from MIMIC-II: https://mimic.physionet.org/mimictables/ to determine which variable/s you could use. Then follow a similar process we have completed here to identify how many patients died during their first hospitalization. 
+
+[Return to Top](#top-link)
+
+### Define the Predictors {.tabset}
+
+When creating clinical prediction models there are a number of strategies to selecting the variables you choose to use as predictors in the model. Sometimes this is based on expert clinical/scientific knowledge, in other cases more data driven approaches are used. For the purposes of this class we are selecting semi-random predictors that can help teach useful analytic skills or demonstrate common types of hidden influencers in preparing prediction models. Specifically we are going to use:
+
+* Gender
+* Age at admission
+* Average oxygen saturation level during the first 12 hours of the ICU stay
+* Any history of hypertension
+
+Let's get started! 
+
+#### Gender
+
+Within MIMIC-III gender is available from the `PATIENTS` table. We can simply take the `GENDER` and `SUBJECT_ID` columns from this table to have the information we need to add to our `analytic_dataset`.
+
+```{r, eval = FALSE}
+gender <- patients %>% 
+  select(SUBJECT_ID, GENDER)
+gender
+```
+
+```{r, echo = FALSE}
+gender <- patients %>% 
+  select(SUBJECT_ID, GENDER)
+gender %>% 
+  predmodel_datatable()
+```
+
+Now, looking at this data it appears that `GENDER` is labeled as either `F` or `M`. Many modeling tools don't accept character labels for prediction variables. Instead you create something called a "dummy variable" that is simply a numeric variable that represents categorical data. In this case we can create a new variable, `male` that is 1 if the patient is male and 0 if the patient is female.
+
+```{r, eval = FALSE}
+gender %>% 
+  mutate(male = case_when(GENDER == "M" ~ 1,
+                          TRUE ~ 0))
+```
+
+```{r, echo = FALSE}
+gender %>% 
+  mutate(male = case_when(GENDER == "M" ~ 1,
+                          TRUE ~ 0)) %>% 
+  predmodel_datatable()
+```
+
+Awesome, each patient with `M` listed in `GENDER` is a `1` in `male`, and those patients with `F` listed in `GENDER` is a `0` in `male`. Let's filter to just `SUBJECT_ID` and `male` and try joining to our `analytic_dataset` to see if our data quality checks come out as expected (100 rows with 100 distinct patients).
+
+```{r, eval = FALSE}
+gender <- gender %>% 
+  mutate(male = case_when(GENDER == "M" ~ 1,
+                          TRUE ~ 0)) %>% 
+  select(SUBJECT_ID, male)
+
+analytic_dataset %>% 
+  left_join(gender) %>% 
+  summarise(count_rows = n(), count_patients = n_distinct(SUBJECT_ID)) 
+```
+
+```{r, echo = FALSE}
+gender <- gender %>% 
+  mutate(male = case_when(GENDER == "M" ~ 1,
+                          TRUE ~ 0)) %>% 
+  select(SUBJECT_ID, male)
+
+analytic_dataset %>% 
+  left_join(gender) %>% 
+  summarise(count_rows = n(), count_patients = n_distinct(SUBJECT_ID)) %>% 
+  predmodel_datatable()
+```
+
+That looks as we expect, we can save and update our `analytic_dataset`!
+
+
+```{r, eval = FALSE}
+analytic_dataset <- analytic_dataset %>% 
+  left_join(gender)
+
+analytic_dataset
+```
+
+```{r, echo = FALSE}
+analytic_dataset <- analytic_dataset %>% 
+  left_join(gender)
+
+analytic_dataset %>% 
+  predmodel_datatable()
+```
+
+
+#### Age at Admission
+
+Next let's identify the patient's age at admission to the hospital. We can find the time of admission in the `ADMISSIONS` table and the patient's date of birth in the `PATIENTS` table. Let's start by limiting the `PATIENTS` table to just the `SUBJECT_ID` and `DOB`. Similarly we can limit the `ADMISSIONS` table to just `SUBJECT_ID`, `HADM_ID`, and `ADMITTIME`
+
+```{r, eval = FALSE}
+date_of_birth <- patients %>% 
+  select(SUBJECT_ID, DOB)
+
+admission_time <- admissions %>% 
+  select(SUBJECT_ID, HADM_ID, ADMITTIME)
+
+date_of_birth
+admission_time
+```
+
+```{r, echo = FALSE}
+date_of_birth <- patients %>% 
+  select(SUBJECT_ID, DOB)
+
+admission_time <- admissions %>% 
+  select(SUBJECT_ID, HADM_ID, ADMITTIME)
+
+date_of_birth %>% predmodel_datatable()
+admission_time %>% predmodel_datatable()
+```
+
+Perfect - let's join these two data frames together to get the base of our `age_at_admission` data frame we will use to calculate this variable. 
+
+```{r, eval = FALSE}
+age_at_admission <- admission_time %>% 
+  left_join(date_of_birth)
+
+age_at_admission  
+```
+
+```{r, echo = FALSE}
+age_at_admission <- admission_time %>% 
+  left_join(date_of_birth)
+
+age_at_admission %>% 
+  predmodel_datatable()
+```
+
+Now we have matched pairs of each hospitalization admission time with the patient's date of birth. We can subtract `DOB` from the `ADMITTIME` and divide by 365.25 (the 0.25 accounts for leap years) to get the patient's age at admission in years. 
+
+
+```{r, eval = FALSE}
+age_at_admission %>% 
+  mutate(age_at_admission = (ADMITTIME - DOB)/365.25) 
+```
+
+```{r, echo = FALSE}
+age_at_admission %>% 
+  mutate(age_at_admission = (ADMITTIME - DOB)/365.25)
+```
+
+So there are a couple of issues here. 
+
+* First, there is a little bit of R specific knowledge you need. When you take the difference between two dates in R, it automatically creates a class of `difftime` that has units (e.g., `days`) associated with the value. Since we are dividing by 365.25, we know this value should actually be in years. We can simply transform this variable to be a regular numeric class that we were expecting by adding an `as.numeric()` around our calculation. 
+* Second, we really only want the whole number of years, we can use the `round()` function to get the closest value in terms of whole years. 
+
+The exact details behind these transformations are beyond the scope of this course, so feel free to use this coding approach for the assignments in this course. However, you should know that working with date/times is much more complicated, and in fact is the focus of one week in Course 6 of the Specialization!
+
+```{r, eval = FALSE}
+age_at_admission %>% 
+  mutate(age_at_admission = round(as.numeric((ADMITTIME - DOB)/365.25)))
+```
+
+```{r, echo = FALSE}
+age_at_admission %>% 
+  mutate(age_at_admission = round(as.numeric((ADMITTIME - DOB)/365.25)))
+```
+
+Much better! Let's go ahead and filter down to just the `SUBJECT_ID`, `HADM_ID`, and `age_at_admission` and try joining on to our `analytic_dataset` to confirm our data quality checks.
+
+```{r, eval = FALSE}
+age_at_admission <- age_at_admission %>% 
+  mutate(age_at_admission = round(as.numeric((ADMITTIME - DOB)/365.25))) %>% 
+  select(SUBJECT_ID, HADM_ID, age_at_admission)
+
+analytic_dataset %>% 
+  left_join(age_at_admission) %>% 
+  summarise(count_rows = n(), count_patients = n_distinct(SUBJECT_ID))
+```
+
+```{r, echo = FALSE}
+age_at_admission <- age_at_admission %>% 
+  mutate(age_at_admission = round(as.numeric((ADMITTIME - DOB)/365.25))) %>% 
+  select(SUBJECT_ID, HADM_ID, age_at_admission)
+
+analytic_dataset %>% 
+  left_join(age_at_admission) %>% 
+  summarise(count_rows = n(), count_patients = n_distinct(SUBJECT_ID)) %>% 
+  predmodel_datatable()
+```
+
+Looking good. Let's add it to `analytic_dataset`.
+
+```{r, eval = FALSE}
+analytic_dataset <- analytic_dataset %>% 
+  left_join(age_at_admission)
+
+analytic_dataset
+```
+
+```{r, echo = FALSE}
+analytic_dataset <- analytic_dataset %>% 
+  left_join(age_at_admission)
+
+analytic_dataset %>% 
+  predmodel_datatable()
+```
+
+
+##### Try it out for yourself:
+* Try calculating age at discharge instead. What is the average age at discharge across all records in the `ADMISSIONS` table?
+
+[Return to Top](#top-link)
+
+#### Average Oxygen Saturation Level During First 12 Hours of ICU Stay
+
+A common type of predictor in clinical models are clinical observations or other vital sign measurements. In this example let's look at the average oxygen saturation level each patient had during their first 12 hours in the ICU. 
+
+First, we have to figure out where oxygen saturation measurements are found in the MIMIC-III data model. According the the [documentation](https://mimic.physionet.org/mimictables/chartevents/) clinical observations are found in the `CHARTEVENTS` table and the labels are in the `D_ITEMS` table. The best way to work with these data are the search the `D_ITEMS` table to find the values you are interested in and then filter the `CHARTEVENTS` table to only those measurements you want. 
+
+Thinking through search terms, oxygen saturation is often abbreviated as `Sp02` or `pulseox`. Let's search the `LABEL` column for these terms 
+
+```{r, eval = FALSE}
+d_items %>% 
+  filter(str_detect(LABEL, pattern = regex("SpO2|pulseox", ignore_case = TRUE)))
+```
+
+```{r, echo = FALSE, message=FALSE}
+d_items %>% 
+  filter(str_detect(LABEL, pattern = regex("SpO2|pulseox", ignore_case = TRUE))) %>% 
+  datatable(escape = FALSE,
+            rownames = FALSE,
+            options = list(dom = 'ltipr',
+                           ordering = FALSE,
+                           scrollY = "500px",
+                           scrollX = TRUE,
+                           scrollCollapse = TRUE,
+                           paging = FALSE,
+                           searchHighlight = TRUE))
+```
+
+It looks like there are a number of values here that are for alarms (`SpO2 Alarm [Low]`, `SpO2 Alarm [High]`, `O2 Saturation Pulseoxymetry Alarm - Low`, `O2 Saturation Pulseoxymetry Alarm - High`), limits (`SpO2-L`, `SpO2 Desat Limit`), and actual measurements (`SpO2`, `O2 saturation pulseoxymetry`).
+
+Let's use the latter two variables that have `ITEM_ID`s of `646` and `220277`. We can filter the chart events table to just these values. Because the `CHARTEVENTS` table is so large, we will just look at the first 20 rows of data for this example. 
+
+```{r, eval = FALSE}
+pulseox <- chartevents %>% 
+  filter(ITEMID %in% c(646, 220277))
+
+pulseox %>% 
+  head(20)
+```
+
+```{r, echo = FALSE}
+pulseox <- chartevents %>% 
+  filter(ITEMID %in% c(646, 220277))
+pulseox %>% 
+  head(20) %>% 
+  predmodel_datatable()
+```
+
+Now that we have the full list of all pulseox measurements in the database, let's simplify the data set a bit by selecting just the information that we need: `SUBJECT_ID`, `HADM_ID`, `ICUSTAY_ID`, `CHARTTIME`, `VALUENUM`.
+
+```{r, eval = FALSE}
+pulseox <- pulseox %>% 
+  select(SUBJECT_ID, HADM_ID, ICUSTAY_ID, CHARTTIME, VALUENUM) 
+
+pulseox %>% 
+  head(20)
+```
+
+```{r, echo = FALSE}
+pulseox <- pulseox %>% 
+  select(SUBJECT_ID, HADM_ID, ICUSTAY_ID, CHARTTIME, VALUENUM) 
+
+pulseox %>% 
+  head(20) %>% 
+  predmodel_datatable()
+```
+
+We can now start to filter these based on how they related to the timing of the ICU environment. From the `ICUSTAYS` table let's select the time they were admitted to the ICU and then join this on our pulseox measurements.
+
+```{r, eval = FALSE}
+icu_admission_time <- icustays %>% 
+  select(SUBJECT_ID, HADM_ID, ICUSTAY_ID, INTIME)
+
+pulseox <- pulseox %>% 
+  inner_join(icu_admission_time)
+
+pulseox %>% 
+  head(20)
+```
+
+```{r, echo = FALSE}
+icu_admission_time <- icustays %>% 
+  select(SUBJECT_ID, HADM_ID, ICUSTAY_ID, INTIME)
+
+pulseox <- pulseox %>% 
+  inner_join(icu_admission_time)
+
+pulseox %>% 
+  head(20) %>% 
+  predmodel_datatable()
+```
+
+With this data set we now can filter to measurements that were only within the first 12 hours of the ICU stay. First, let's make a new variable `end_time` that is 12 hours after the ICU `INTIME`. While again, the specifics of understanding how time in handled in R is beyond the scope of this class, all you need to know is that R understands date-time objects in terms of seconds. So to add 12 hours, we need to multiply 12 by the number of seconds in one hour (3600, e.g., 60 seconds/minute x 60 minutes/hour).
+
+```{r, eval = FALSE}
+pulseox <- pulseox %>% 
+  mutate(end_time = INTIME + 12*3600)
+
+pulseox %>% 
+  head(20)
+```
+
+```{r, echo = FALSE}
+pulseox <- pulseox %>% 
+  mutate(end_time = INTIME + 12*3600)
+
+pulseox %>% 
+  head(20) %>% 
+  predmodel_datatable()
+```
+
+That looks like our calculation worked as expected. Now we can simply filter to measurements where `CHARTTIME` is later than `INTIME` and earlier than `end_time`.
+
+```{r, eval = FALSE}
+pulseox <- pulseox %>% 
+  filter(CHARTTIME >= INTIME & CHARTTIME <= end_time) 
+
+pulseox %>% 
+  head(20)
+```
+
+```{r, echo = FALSE}
+pulseox <- pulseox %>% 
+  filter(CHARTTIME >= INTIME & CHARTTIME <= end_time) 
+
+pulseox %>% 
+  head(20) %>% 
+  predmodel_datatable()
+```
+
+Again, by visual inspection that worked as expected. Now let's group by each ICU admission and calculate the average pulseox value over the twelve hours. 
+
+```{r, eval = FALSE}
+pulseox <- pulseox %>% 
+  group_by(SUBJECT_ID, HADM_ID, ICUSTAY_ID) %>% 
+  summarise(mean_first12hr_pulseox = mean(VALUENUM))
+
+pulseox
+```
+
+```{r, echo = FALSE}
+pulseox <- pulseox %>% 
+  group_by(SUBJECT_ID, HADM_ID, ICUSTAY_ID) %>% 
+  summarise(mean_first12hr_pulseox = mean(VALUENUM))
+
+pulseox %>% 
+  predmodel_datatable()
+```
+
+Now let's try joining on our `analytic_dataset` and run our data quality checks.
+
+```{r, eval = FALSE}
+analytic_dataset %>% 
+  left_join(pulseox) %>% 
+  summarise(count_rows = n(), count_patients = n_distinct(SUBJECT_ID))
+```
+
+```{r, echo = FALSE}
+analytic_dataset %>% 
+  left_join(pulseox) %>% 
+  summarise(count_rows = n(), count_patients = n_distinct(SUBJECT_ID)) %>% 
+  predmodel_datatable()
+```
+
+Our join looks safe, let's save it and move on to the last variable in our model!
+
+```{r, eval = FALSE}
+analytic_dataset <- analytic_dataset %>% 
+  left_join(pulseox)
+
+analytic_dataset
+```
+
+```{r, echo = FALSE}
+analytic_dataset <- analytic_dataset %>% 
+  left_join(pulseox)
+
+analytic_dataset %>% 
+  predmodel_datatable()
+```
+
+
+##### Try it out for yourself:
+* Try calculating the minimum respiratory rate in the first 24 hours of every hospitalization. First, what are the `ITEM_ID`s you used to identify respiratory rate? Once you have calculated the minimum value - what is the average minimum value across *all* hospitalizations?
+
+[Return to Top](#top-link)
+
+#### Any History of Hypertension
+
+Now let's add a variable that captures if the patient has ever had a hypertension diagnosis code. From Course 3 we remember that diagnoses are stored in `DIAGNOSES_ICD` and the ICD-9-CM code for hypertension is 401.* (401.0, 401.1, 401.9).
+
+Let's filter that table to only include the hypertension codes.
+
+```{r, eval = FALSE}
+hypertension <- diagnoses_icd %>% 
+  filter(ICD9_CODE %in% c("4010", "4011", "4019" ))
+
+hypertension
+```
+
+```{r, echo = FALSE}
+hypertension <- diagnoses_icd %>% 
+  filter(ICD9_CODE %in% c("4010", "4011", "4019" ))
+
+hypertension %>% 
+  predmodel_datatable()
+```
+
+Now we can create a list of unique `SUBJECT_ID`s that are present in this data set.
+
+```{r, eval = FALSE}
+hypertension <- hypertension %>% 
+  distinct(SUBJECT_ID)
+
+hypertension
+```
+
+```{r, echo = FALSE}
+hypertension <- hypertension %>% 
+  distinct(SUBJECT_ID)
+
+hypertension %>% 
+  predmodel_datatable()
+```
+
+Now all we need to do is make a dummy variable `hypertension` and assign these individuals a 1 if they are on this list.
+
+```{r, eval = FALSE}
+hypertension <- hypertension %>% 
+  mutate(hypertension = 1)
+
+hypertension
+```
+
+```{r, echo = FALSE}
+hypertension <- hypertension %>% 
+  mutate(hypertension = 1)
+
+hypertension %>% 
+  predmodel_datatable()
+```
+
+Now let's join onto the `analytic_dataset` and perform our data quality check.
+
+```{r, eval = FALSE}
+analytic_dataset %>% 
+  left_join(hypertension) %>% 
+  summarise(count_rows = n(), count_patients = n_distinct(SUBJECT_ID))
+```
+
+```{r, echo = FALSE}
+analytic_dataset %>% 
+  left_join(hypertension) %>% 
+  summarise(count_rows = n(), count_patients = n_distinct(SUBJECT_ID)) %>% 
+  predmodel_datatable()
+```
+
+
+Looks good, let's save it. 
+
+```{r, eval = FALSE}
+analytic_dataset <- analytic_dataset %>% 
+  left_join(hypertension)
+
+analytic_dataset
+```
+
+```{r, echo = FALSE}
+analytic_dataset <- analytic_dataset %>% 
+  left_join(hypertension)
+
+analytic_dataset %>% 
+  predmodel_datatable()
+```
+
+Now, this variable is a little bit different than our previous predictors. In this case when we joined our `analytic_dataset` with `hypertension` we only indicated those patients who had a history of hypertension. We *did not* indicate which patients did not have any known history of hypertension. Our previous predictors all either had measurements available or not, none of the predictors were constructed based on any history vs no history. 
+
+To fix this problem we need to go and fill in all missing values for the `hypertension` variable with a 0 if there there is currently a missing value. 
+
+```{r, eval = FALSE}
+analytic_dataset <- analytic_dataset %>% 
+  mutate(hypertension = case_when(is.na(hypertension) ~ 0,
+                                   TRUE ~ hypertension))
+
+analytic_dataset
+```
+
+```{r, echo = FALSE}
+analytic_dataset <- analytic_dataset %>% 
+  mutate(hypertension = case_when(is.na(hypertension) ~ 0,
+                                   TRUE ~ hypertension))
+
+analytic_dataset %>% 
+  predmodel_datatable()
+```
+
+
+##### Try it out for yourself:
+* Instead of using the `DIAGNOSES_ICD` table, try using the `DIAGNOSIS` variable in the `ADMISSIONS` table. How many people in had an admissions diagnosis involving any type of "sepsis" for their *first* hospitalization?
+
+[Return to Top](#top-link)
+
+
+## Build the Model {.tabset}
+
+There are a number of different ways to build and test prediction models. While that is beyond the scope of this course, we will be applying a fairly standard approach when dealing with larger data sets: splitting into a training and testing population. 
+
+We can use the `rsample` package from R to easily perform this splitting step on our analytic data set. This is typically a random process - but because we want you to be able to easily reproduce the results of this training document, we will use a function called `set.seed()` which will cause the split to be the same no matter who runs this analysis. We can then use `initial_split()` function to create a `training_data` set that has 70% of the total `analytic_data set` and a `testing_data` set that has the remaining 30% of the `analytic_data set`.
+
+```{r, eval = FALSE}
+library(rsample)
+
+set.seed(2020)
+
+data_split <- initial_split(analytic_dataset, prop = 7/10)
+
+training_data <- training(data_split)
+testing_data <- testing(data_split)
+
+training_data
+testing_data
+```
+
+```{r, echo = FALSE}
+library(rsample)
+
+set.seed(2020)
+
+data_split <- initial_split(analytic_dataset, prop = 7/10)
+
+training_data <- training(data_split)
+testing_data <- testing(data_split)
+
+training_data %>% 
+  predmodel_datatable()
+testing_data %>% 
+  predmodel_datatable()
+```
+
+We are finally ready! Now we can build a logistic regression model using the `training_data` and the `glm()` function in R with `los_outcome` as the outcome and `male`, `age_at_admission`, `mean_first12hr_pulseox`, and `hypertension` as the predictors. 
+
+```{r, eval = FALSE}
+model <- training_data %>% 
+  glm(formula = los_outcome ~ male + age_at_admission + mean_first12hr_pulseox + hypertension, 
+      family = "binomial")
+
+summary(model)
+```
+
+```{r, echo = FALSE}
+model <- training_data %>% 
+  glm(formula = los_outcome ~ male + age_at_admission + mean_first12hr_pulseox + hypertension, 
+      family = "binomial")
+
+summary(model)
+```
+
+Because the outcome is binary (1/0) we use the "binomial" family in the regression model. The summary output gives us the estimate, standard error, test statistic (z-value) and p-value for each variable in our model, including the intercept. For the binary predictors (`male`, `hypertension`) the estimate indicates the change in log odds of having a longer than average ICU stay if the person falls into the reference category as opposed to the non-reference level (ex. the log odds of having a longer than average ICU stay for male patients are lower than female patients by 1.63). For continuous variables (`age_at_admission`, `mean_first12hr_pulseox`), the estimates represent the change in log odds of death for every 1 unit change. One variable, `male` is significant at a level of p=0.05.
+
+
+We can evaluate the fit of this model within the `training_data` by using the model to predict outcomes on the `training_data` and plotting a receiver operating characteristic (ROC) curve which we can use to calculate the AUC (Area Under the Curve) statistic.  We use the `predict()` function to make a new variable in the `training_data` data frame, `predicted_outcome`. Then we can use the `plotROC` library to make the ROC plot and calculate the AUC
+
+```{r, eval = FALSE}
+training_data$predicted_outcome <- predict(model, training_data, type = "response")
+
+library(plotROC)
+
+training_roc <- training_data %>% 
+  ggplot(aes(m = predicted_outcome, d = los_outcome)) +
+    geom_roc(n.cuts = 10, labels=F, labelround = 4) +
+    style_roc(theme = theme_grey) 
+
+training_roc
+
+calc_auc(training_roc)$AUC*100
+```
+
+```{r, echo = FALSE}
+training_data$predicted_outcome <- predict(model, training_data, type = "response")
+
+library(plotROC)
+
+training_roc <- training_data %>% 
+  ggplot(aes(m = predicted_outcome, d = los_outcome)) +
+    geom_roc(n.cuts = 10, labels=F, labelround = 4) +
+    style_roc(theme = theme_grey) 
+
+training_roc
+
+calc_auc(training_roc)$AUC*100
+```
+
+High performing models have ROC plots that get as close to 1 on the y-axis as close to 0 on the x-axis as possible. The diagonal line in the center represents completely random performance. Given the small sample size and completely random predictor selection this isn't terrible performance. Similarly an AUC of 73.4% is also surprisingly good. However remember that this is predicting based on the data used to *generate* the model, so we are definitely getting better performance that we will expect to see in the testing data set. 
+
+We also can test whether this performance is equally distributed across groups of patients. In this case let's look at gender - do we see the same performance accuracy between men and women?
+
+```{r, eval = FALSE}
+stratified_training_roc <- training_data %>% 
+  mutate(Gender = case_when(male == 1 ~ "male",
+                            TRUE ~ "female")) %>% 
+  ggplot(aes(m = predicted_outcome, d = los_outcome, color = Gender)) +
+    geom_roc(n.cuts = 10, labels=F, labelround = 4) +
+    style_roc(theme = theme_grey) 
+
+stratified_training_roc
+
+calc_auc(stratified_training_roc) %>% 
+  select(group, AUC) %>% 
+  mutate(group = case_when(group == 1 ~ "female",
+                           group == 2 ~ "male"),
+         AUC = AUC*100)
+```
+
+```{r, echo = FALSE}
+stratified_training_roc <- training_data %>% 
+  mutate(Gender = case_when(male == 1 ~ "male",
+                            TRUE ~ "female")) %>% 
+  ggplot(aes(m = predicted_outcome, d = los_outcome, color = Gender)) +
+    geom_roc(n.cuts = 10, labels=F, labelround = 4) +
+    style_roc(theme = theme_grey) 
+
+calc_auc(stratified_training_roc) %>% 
+  select(group, AUC) %>% 
+  mutate(group = case_when(group == 1 ~ "female",
+                           group == 2 ~ "male"),
+         AUC = AUC*100) %>% 
+  predmodel_datatable()
+```
+
+From this analysis we can see that the model performance is really being driven by the male members of the data set. The model has an AUC of 78.3% in men and 66.4% in women. This could potentially be problematic it these results are representative of the model performance in practice. 
+
+#### Try it out for yourself:
+* Based on the previous "Try it out for yourself" exercises, build a prediction model for longer than average length of stay (`los_outcome`) using the predictors: gender (e.g., `male`), age at discharge (`age_at_discharge`), minimum respiratory rate in the first 24 hours of hospital admission (`min_first24hr_resprate`), and sepsis as one of the admission diagnoses (`sepsis`). Use the same training/testing splits as we did for this model. Are there any significant results (p<0.05)? When you try predicting on the `training_data` what AUC do you get? Make sure to set.seed to 2020 before you split out the training and testing populations!
+
+[Return to Top](#top-link)
+
+## Evaluate the Model {.tabset}
+
+And now the moment of truth - how well does this model work on our `testing_data`? More importantly, we want to think through all the implications of the model that we build and the utility the model might have in practice. 
+
+### Quantitative Validation
+
+For the initial quantitative validation we can just do the same steps that we did with the `training_data` evaluation, but with the `testing_data` data set. 
+
+```{r, eval = FALSE}
+testing_data$predicted_outcome <- predict(model, testing_data, type = "response")
+
+testing_roc <- testing_data %>% 
+  ggplot(aes(m = predicted_outcome, d = los_outcome)) +
+    geom_roc(n.cuts = 10, labels=F, labelround = 4) +
+    style_roc(theme = theme_grey) 
+
+testing_roc
+
+calc_auc(testing_roc)$AUC*100
+```
+
+```{r, echo = FALSE}
+testing_data$predicted_outcome <- predict(model, testing_data, type = "response")
+
+testing_roc <- testing_data %>% 
+  ggplot(aes(m = predicted_outcome, d = los_outcome)) +
+    geom_roc(n.cuts = 10, labels=F, labelround = 4) +
+    style_roc(theme = theme_grey) 
+
+testing_roc
+
+calc_auc(testing_roc)$AUC*100
+```
+
+As expected the performance of this model got significantly worse in the `testing_data`. An AUC of 58.2% is quite poor - because an AUC of 50% means the model is unable to distinguish between the two outcomes. 
+
+#### Try it out for yourself:
+* Try evaluating your model for longer than average length of stay (`los_outcome`) using the predictors: gender (e.g., `male`), age at discharge (`age_at_discharge`), minimum respiratory rate in the first 24 hours of hospital admission (`min_first24hr_resprate`), and sepsis as one of the admission diagnoses (`sepsis`) within the `testing_data`. What is the final AUC?
+
+[Return to Top](#top-link)
+
+### Qualitative Evaluation
+
+Now that we have finished the quantitative evaluation (with not so great results), let's think more qualitatively about the model building and evaluation process.
+
+First, let's think about our model design and which patients for whom our model wouldn't work well. When we first decided on our prediction model population we limited our analysis to patients' first ICU stay in their first hospitalization. This means that our model likely won't perform on patients experiencing a repeat ICU stay within a single hospitalization and may not be valid for patients who have a history of hospitalizations and ICU stays. 
+
+Another thing to consider, did you happen to notice when we built the model that there was a little line in `summary` output that said `(9 observations deleted due to missingness)`? One of the limitations of basic regression modeling is that you cannot have any missing values when building the model. Let's look at the population of patients that we removed due to missingness.
+
+```{r, eval = FALSE}
+training_data %>% 
+  select(-predicted_outcome) %>% 
+  filter_all(any_vars(is.na(.))) 
+```
+
+```{r, echo = FALSE}
+training_data %>% 
+  select(-predicted_outcome) %>% 
+  filter_all(any_vars(is.na(.))) %>% 
+  predmodel_datatable()
+```
+
+It appears that the majority of the people removed were missing an age. Perhaps this is because they were too sick to provide a date of birth on admission. If this were the case we may be inadvertently removing the most seriously ill patients from our data set. 
+
+Another consideration we should think about is whether the training population is representative of our broader clinic population. Especially consider the representation of women and minorities as well as measures of socioeconomic status within the training data set and the intended clinic population where the model would be put into practice. If you have large enough data sets strongly consider testing the performance of the model among the patient subgroups to ensure both equity of benefit and to ensure that the model doesn't actually cause harm in a particular sub-population of patients. 
+
+Remember that with great power comes great responsibility. While clinical prediction models have a lot of potential for improving clinical care, they also can cause significant harm if their performance and utility are not fully evaluated before implementation. 
+
+#### Try it out for yourself:
+* What other choices made in our model would affect it's performance and utility in the clinic?
+
+[Return to Top](#top-link)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
