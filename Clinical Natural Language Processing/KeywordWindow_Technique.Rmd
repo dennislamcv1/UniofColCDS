@@ -1,0 +1,1221 @@
+---
+title: "Keyword Window Techniques"
+author: "Laura K. Wiley, PhD"
+output:
+  html_document:
+    df_print: paged
+    theme: paper
+  html_notebook: null
+editor_options:
+  chunk_output_type: console
+---
+<style>
+  .coding-explanation {
+    background-color: #FDF9E4;
+    padding: 10px;
+    border: 1px solid;
+    border-color: #F7EBCF;
+    margin-left: 50px;
+    margin-right: 50px;
+    border-radius: 5px;
+    color: #866E42;}
+</style>
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE)
+library(DT)
+
+## This is a helper function to pretty print the dataset. 
+##### The escape argument allows the html newline (</br>) to show up as a newline
+##### The rownames column suppresses the basic DT rowline number (which is the same as the NOTE_ID in this case)
+##### The options set the page length to display two notes, and allow for searches with highlighting.
+##### The last option "columnDefs" is a function that takes the text column and essentially replaces newline characters with the html code for a newline (</br>)
+##### 
+nlp_example_datatable <- function(dataset){
+  dataset %>% 
+      datatable(escape = FALSE,
+                rownames = FALSE,
+                options = list(ordering = FALSE,
+                               scrollY = "500px",
+                               scrollCollapse = TRUE,
+                               paging = FALSE,
+                               searchHighlight = TRUE,
+                               columnDefs = list(list(targets = 1,
+                                                      render = JS("function(data, type, row, meta){",
+                                                                  "return data.split('\\n').join('<br/>');",
+                                                                  "}")))))
+}
+
+nlp_example_doublecol_datatable <- function(dataset){
+  dataset %>% 
+      datatable(escape = FALSE,
+                rownames = FALSE,
+                options = list(ordering = FALSE,
+                               scrollY = "500px",
+                               scrollCollapse = TRUE,
+                               paging = FALSE,
+                               searchHighlight = TRUE,
+                               columnDefs = list(list(targets = c(1,2),
+                                                      render = JS("function(data, type, row, meta){",
+                                                                  "return data.split('\\n').join('<br/>');",
+                                                                  "}")))))
+}
+
+nlp_keywordwindow_datatable <- function(dataset) {
+  dataset %>%
+    datatable(escape = FALSE,
+              rownames = F,
+              options = list(
+                ordering = FALSE,
+                scrollY = "500px",
+                scrollCollapse = TRUE,
+                paging = FALSE,
+                searchHighlight = TRUE,
+                autoWidth = TRUE,
+                columnDefs = list(list(targets = 1,
+                                       render = DT::JS('$.fn.dataTable.render.ellipsis( 65 )')))),
+              plugins = 'ellipsis')
+}
+```
+
+<br>
+This programming reading is provided as part of week four of "Clinical Natural Language Processing", the fourth course in the Coursera Clinical Data Science Specialization created by the University of Colorado Anschutz Medical Campus and supported by our industry partner Google Cloud. 
+
+Last week you learned how to apply regular expressions and the ["Note Section Technique"](https://www.coursera.org/learn/clinical-natural-language-processing/lecture/VcNK1/techniques-note-sections) to process clinical text. This week we are focusing on learning how to apply the ["Keyword Window Technique"](https://www.coursera.org/learn/clinical-natural-language-processing/lecture/akk0V/techniques-keyword-windows) for text processing. This approach uses the text surrounding a word/phrase of interest to understand the meaning or usage of that word or phrase. For example, if we are looking for patients who experienced muscle pain while on statins, we might search for the keyword "statin". If the text around the phrase says something like "Patient experiencing muscle pain after starting statin therapy." we would conclude they are having the reaction. However, if the phrase was "No evidence of statin induced muscle pain." we would not come to the same conclusion. 
+
+In these examples, we will use clinical notes created by medical transcriptionists that are freely available from www.MTSamples.com. Although these notes were created as training examples rather than notes for real patients, I can confidently say that these notes are very realistic to what you will see as a clinical data scientist. In some cases we have edited the text slightly to provide you with 1) additional messiness common in provider created notes and 2) specific examples of negation and other false positives to demonstrate real-life text processing challenges. There are three data sets available on Google BigQuery for this course, all of which are stored in `course4_data`:
+
+* `radiology_reports` - This is a set of 11 radiology reports from abdominal CT scans. This will be the primary data set used in these worked examples.
+* `discharge_summaries` - This is a set of 15 discharge summaries that will be used for the _"Try it out for yourself:"_ practice problems.
+* `diabetes_historyandphysical` - This is a set of >100 notes that you will be using for the course Practical Application project in Week 5.
+
+# Getting Started 
+
+First, let's set up our environment. We need three packages:
+
+* `tidyverse` - group of packages for data wrangling and visualization - this automatically loads the text processing package `stringr`
+* `magrittr` - package for piping data analysis chains
+* `bigrquery` - package for connecting to BigQuery database
+
+We also set up our connection to the Google BigQuery project to be able to access the data used in this course. If you aren't familiar with these packages I highly recommend working through the R programming section of "Introduction to Clinical Data Science", the first course in the Coursera Clinical Data Science Specialization.
+
+```{r, message=FALSE, results='hide'}
+library(tidyverse)
+library(magrittr)
+library(bigrquery)
+
+con <- DBI::dbConnect(drv = bigquery(),
+                      project = "learnclinicaldatascience")
+radiology_reports <- tbl(con, "course4_data.radiology_reports") %>% 
+  collect()
+discharge_summaries <- tbl(con, "course4_data.discharge_summaries") %>% 
+  collect()
+```
+
+# {#top-link}
+# Programming Examples {.tabset}
+
+In this week of the course you are going to work through two sets of text processing tasks. The first we will work together and the second you will work through as part of the the _"Try it out for yourself"_ examples.
+
+* __Worked Example:__ Identifying patients who have any type of cyst in their abdomen or pelvis and extracting the location of the cyst.
+* ___"Try it out for yourself"_ Example:__ Identifying patients who have hypertension and extracting any listed blood pressure values.
+
+To apply the note section technique you will follow four steps:
+
+1. Identify Search Strategy
+2. Extract Text Window
+3. Process Text Window
+    a. Identification Task
+    b. Extraction Task
+
+We will go through each of these steps in the following tabs.
+
+## Identify Search Strategy {.tabset} 
+
+The first step to applying the Keyword Window Technique is to identify a search strategy and approach. In this planning you want to define the following steps:
+
+1. What note types are you searching?
+2. What keywords are you using to create a search window?
+3. What size window will you search?
+4. What types of information will you be looking for in the search window to accomplish your task?
+
+### Note Type Selection
+
+Unlike the "Note Section Technique", the Keyword Window approach can be applied across multiple different note types without customization. However, it is still useful to think carefully about which notes you choose to search. In this case our goal is to identify which patients have a cyst in their abdomen or pelvis and then extract the location/s of the cyst/s. The most obvious place to look will be in imaging reports from CT scans of the abdomen and pelvis. We could easily reapply this approach for other imaging techniques of the same area - for example in an MRI of the abdomen or pelvis. 
+
+### Keyword Selection
+
+When applying the Keyword Window Technique we want to think of keywords that we are interested in understanding how they are being used. This technique looks at the text around each mention of these keywords to understand the context - for example 10 words before and 10 words after the keyword. This is the "keyword window".
+
+For this example, we want to find out information about cysts that the patient may have in their abdomen or pelvis. Our keyword then should be any word that indicates cysts - so we'd want something that captures "cyst" and "cysts." We also would want to include descriptive words that indicate cysts like "cystic". 
+
+In the example of statin-induced muscle pain, we might look for every mention of statins. In that case our keywords would need to include:
+
+1) All generic names of drugs that contain statins - including combination drugs
+2) All brand names of drugs that contain statins
+3) Generic words like "statin"/"statins", and the class type - "HMG-CoA Reductase Inhibitors"
+
+Based on the words you want to find, you will write regular expressions to capture those keywords. For our cyst example, we can use the same regular expression you wrote in Week 2 - `"(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])"`. Once you have your regular expression, then you need to decide what size window you will use.
+
+### Window Size Selection {.tabset}
+
+As we talked about in the video this week, picking the size of your keyword window is a somewhat arbitrary process. In more automated text mining applications you typically will apply the algorithm across a variety of text window sizes and pick which window has the best performance. This is a good approach for building replicable and generalizable tools that will work on many different types or corpuses of notes. However, when I'm applying text-processing, I usually have a single set of data that I'm trying to work with and thus just need a single approach that works well enough for my particular data set or datastream. You can think of this like performing a single analysis rather than building a tool for the community. 
+
+So how do _I_ decide a text window size? Well, there are actually a couple of steps that I tend to follow:
+
+#### Selecting Initial Window Size
+
+The first step is to just pick a window size to start the process. This should be part of your search strategy planning and will depend on your task. For example, if you think the information you are interested in will be close by to the keyword you are searching for, then starting with a smaller window makes sense. Let's say that you wanted to extract the type of diabetes a person had - you're keyword would be something like "diabetes" and you'd expect the sub-type to be next to, or very close to the keyword (e.g., "Type 1 Diabetes"or "Diabetes (Type II)"). In this case we may start with a total window size of 10 words (5 words before the keyword and 5 after). More complex tasks - like trying to find side effects of medications - might be a sentence or two away from the keyword. In these cases you might start with a larger window of 30+ words. 
+
+For the task we are focused on, identifying cyst location, it probably will be in the same sentence as the word cyst. In this case a medium-size window, say 20 words (10 words before and 10 after) would be a good starting point. Once you have this initial window size identified and extracted you will move on start processing the text window. During that process you may find that your initial guess isn't working as well as you had hoped (maybe you're not finding many matches or you have a lot of off-target matches). If that's the case, then you want to move on to the next step of adjusting the window size. 
+
+#### Adjusting the Window Size
+
+Once you have your initial window you will want to start processing the text window. During the initial development phase of that process I like to keep a copy of the full note available for review. As I start processing each text window this allows me to quickly look at the broader context of the text in the window.
+
+Typically I take a quick skim a random sample of 30-50 windows and just look for keywords in my search strategy. As I go along, I am also looking at the full note text trying to see if there is consistently text right outside the window that would impact my classification or extraction task. If in this skimming I see that a significant number (say >30%) are consistently just outside the window, I will increase my window size based on how far away I'm seeing relevant text. For example if the information is right outside the window - increasing by 4-5 words on each end is enough. If they are further away I may add a larger number of words. 
+
+During the initial skim process I may see that my text windows are often much larger than necessary. However I usually don't adjust the window at that time - but I keep in mind as I continue the text processing steps. One of the stages of text processing is removing off-target matches - keywords that should indicate a match, but in that window actually aren't related to the task I am performing. If this happens frequently (>20% of the windows) _and_ I had seen that most windows had larger windows than were necessary (e.g., the information I needed for my task was close to the keyword in the center of the window), then I will reduce the size of the window. I typically am cautious about decreasing my window size too much at any one time because most of my tasks need higher sensitivity and I don't want to lose important information. I also typically can afford the time to create additional exclusions to increase my overall specificity. Depending on your task you may have different thresholds and prefer the higher specificity of small windows, recognizing that you are reducing your sensitivity. 
+
+Honestly as you perform more of these text processing tasks you develop a bit more a gut-sense based on what you are seeing in the data to make this a relatively quick iterative process. No number you pick will be perfect - you just want to get close enough to accomplish your task. However if you are trying to build more robust reproducible tools, you likely will want to take a more data-driven approach like is done in text mining. 
+
+### Search Selection
+
+Once you have identified the keywords you want to use, and the initial window size you will try - then you will want to plan a search approach depending on your task. I generally think there are three general types of tasks here:
+
+1. Confirming Keyword
+2. Identifying information around the keyword
+3. Extracting information around the keyword
+
+Let's look at each of these three tasks a bit closer:
+
+#### Confirming Keyword
+
+This task is confirming that they keyword you selected is accurate for the patient in question. For our example, we want to identify any patient who has a cyst in their abdomen or pelvis. As we look at every mention of "cyst", "cysts", or "cystic" we want to make sure that it is not negated (e.g., "No evidence of cysts, masses, or lesions."), referencing someone else (e.g., "Patient has family history of cystic kidney disease, routine screening."), or referencing an unrelated condition (e.g., "Patient has cystic fibrosis.").
+
+In this case, the search approach would be to:
+
+1. Initially assume that any mention of cyst/s or cystic in the report of a CT scan of the abdomen/pelvis indicates the patient has a cyst in the abdomen/pelvis.
+2. Search cyst keyword windows for evidence of negation or unrelated disease/patient. If present, remove that text window from consideration. 
+3. If a note has one or more cyst keyword windows that have not been removed in Step 2 -> conclude scan identified cyst in the abdomen and/or pelvis. 
+
+#### Identifying Keyword Information
+
+In the previous confirmation task, we only cared that the patient had _any_ cyst in the abdomen or pelvis. Instead you may be tasked with identifying patients who have a splenic cyst (cyst of the spleen). In this case you might take the following approach:
+
+1. Search all cyst keyword windows for evidence that the cyst occurs in the spleen. If evidence that the cyst is in the spleen then keep the keyword window. If the cyst located elsewhere or location is not specified then remove the text window from consideration.
+2. Search all splenic cyst keyword windows for evidence of negation or unrelated disease/patient. If present, remove that text window from consideration. 
+3. If a note has one or more splenic cyst keyword windows that have not been removed in Step 2 -> conclude the scan identified a splenic cyst. 
+
+#### Extracting Keyword Information
+
+The final task you may encounter is where you not only want to know whether the patient has a cyst, but you also want to know _where_ the cyst is located. This is one approach you may take:
+
+1. Search cyst keyword windows for evidence of negation or unrelated disease/patient. If present, remove that text window from consideration.
+2. For all remaining cyst keyword windows, write regular expressions to extract location of the cyst. Depending on your goal, you may need to map specific locations to organ groups (e.g., "left anterior mid pole region" -> "Kidney").
+
+[Return to Top](#top-link)
+
+### Try it out for yourself:
+
+The "Try it out for yourself" exercises you will have two goals:
+
+1. Use discharge summaries to identify patients who have hypertension. 
+2. Extract any blood pressure measurements listed in those same discharge summaries. 
+
+It is expected that your search strategy may be different for these two goals. With that in mind, use these questions to help guide your approach.
+
+* What keyword/s would you use for each goal?
+* For the goal of identifying which patients have hypertension (Goal #1) - what initial window size would you select? Small (<10 words), Medium (10-25 words), or Large (26+ words)?
+* For the goal of extracting any blood pressure measurements mentioned in the discharge summary (Goal #2) - what initial window size would you select? Small (<10 words), Medium (10-25 words), or Large (26+ words)?
+* Which search approach would you use for each goal?
+
+_Please note that we will reveal some of the answers to these questions in the future sections, so try answering these now!_
+
+[Return to Top](#top-link)
+
+## Extract Text Window {.tabset}
+
+Once you have your approach lined up, there are a number of steps required to prepare your note and extract your text window of interest. We will first go through the general process of preparing the note, creating text windows with an arbitrary size, and selecting the text window/s of interest. Then I will talk you through the process of how to determine the optimal window size for your task. 
+
+### Prepare Note and Select Windows of Interest
+
+According to our plan, we will search radiology reports of CT scans of the abdomen and pelvis. We want to find _all_ uses of the word "cyst" or "cystic" and extract text windows around those keywords. For this initial example, let's look at a single note:
+
+```{r, eval = FALSE}
+example_note <- radiology_reports %>% 
+  filter(NOTE_ID == 3)
+example_note
+```
+
+```{r, echo = FALSE}
+example_note <- radiology_reports %>% 
+  filter(NOTE_ID == 3)
+
+example_note %>% 
+  nlp_example_datatable()
+```
+
+If you search for the term cyst you will notice that there are four different mentions within the note. So how do we actually extract the text around those mentions?
+
+One of the easier and most flexible ways to create keyword windows is to break a note into each individual word. We are going to define words as anything between spaces or new-line characters. To break up the note, we can use the same function `separate_rows()` that we used to break up note sections in last week's "Note Section Technique" programming example. First though, let's make a new column called "WORDS" that will contain each word.
+
+```{r, eval = FALSE}
+example_note %>%
+  mutate(WORDS = TEXT) %>%
+  separate_rows(WORDS, sep = "[ \n]+")
+```
+
+<p class="coding-explanation">
+<strong>Code Explanation:</strong>
+In this code, we first copy the content from `TEXT` into a new variable `WORDS`. We then use the `separate_rows()` function to split the column `WORDS` at every match to our regular expression. The content between the regular expression becomes a new row, with the `NOTE_ID` and `TEXT` column duplicated in each row. In this example the regular expression used to split the note is to match any space or new-line `\n` character one or more times. 
+</p>
+
+```{r, echo = FALSE}
+example_note %>% 
+  mutate(WORDS = TEXT) %>% 
+  separate_rows(WORDS, sep = "[ \n]+") %>% 
+  nlp_keywordwindow_datatable()
+```
+
+Now that we have our list of individual words, we want to build a index column - this assigns a number to each row that shows the order of the word in the note. For example, an index of 1 is the first word, while an index of 30 is the thirtieth word in the note.
+
+```{r, eval = FALSE}
+example_note %>% 
+  mutate(WORDS = TEXT) %>% 
+  separate_rows(WORDS, sep = "[ \n]+") %>% 
+  mutate(INDEX = seq(from = 1, to = n(), by = 1.0))
+```
+
+<p class="coding-explanation">
+<strong>Code Explanation:</strong>
+This code creates a column labeled `INDEX` that uses the `seq()` function to get a sequence of numbers `from` 1 `to` the number of rows (`n()`), counting `by` 1.
+</p>
+
+```{r, echo = FALSE}
+example_note %>% 
+  mutate(WORDS = TEXT) %>% 
+  separate_rows(WORDS, sep = "[ \n]+") %>% 
+  mutate(INDEX = seq(from = 1, to = n(), by = 1.0)) %>% 
+  nlp_keywordwindow_datatable()
+```
+
+The reason we created the index was so that we can define the size of the window based on the position of each keyword. Let's try making a window around a keyword with 10 words before and 10 words after the keyword. For each word, the window starts 10 words before the index value. The window then ends 10 words after the index value.
+
+```{r, eval = FALSE}
+example_note %>% 
+  mutate(WORDS = TEXT) %>% 
+  separate_rows(WORDS, sep = "[ \n]+") %>% 
+  mutate(INDEX = seq(from = 1, to = n(), by = 1.0),
+         WINDOW_START = INDEX - 10,
+         WINDOW_END = INDEX + 10)
+```
+
+<p class="coding-explanation">
+<strong>Code Explanation:</strong>
+We created two new variables `WINDOW_START` and `WINDOW_END` that are just the INDEX value minus or plus 10 respectively.
+</p>
+
+```{r, echo = FALSE}
+example_note %>% 
+  mutate(WORDS = TEXT) %>% 
+  separate_rows(WORDS, sep = "[ \n]+") %>% 
+  mutate(INDEX = seq(from = 1, to = n(), by = 1.0),
+         WINDOW_START = INDEX - 10,
+         WINDOW_END = INDEX + 10) %>% 
+  nlp_keywordwindow_datatable()
+```
+
+Now that we know the start and end of each window, we can use a handy function in the `stringr` package called `word()` that extracts words based on word indices and separating characters. Let's try it out and put the results in a new column called `WINDOW`.
+
+```{r, eval = FALSE}
+example_note %>% 
+  mutate(WORDS = TEXT) %>% 
+  separate_rows(WORDS, sep = "[ \n]+") %>% 
+  mutate(INDEX = seq(from = 1, to = n(), by = 1.0),
+         WINDOW_START = INDEX - 10,
+         WINDOW_END = INDEX + 10,
+         WINDOW = word(string = TEXT, start = WINDOW_START, end = WINDOW_END, sep = "[ \n]+"))
+```
+
+<p class="coding-explanation">
+<strong>Code Explanation:</strong>
+We are adding a new column called `WINDOW` that uses the function `word()` to extract words from the `TEXT` column starting at the `WINDOW_START` position and ending at the `WINDOW_END` position. Words are defined as the text between the separator "[ \n+]"
+</p>
+
+```{r, echo = FALSE}
+example_note %>% 
+  mutate(WORDS = TEXT) %>% 
+  separate_rows(WORDS, sep = "[ \n]+") %>% 
+  mutate(INDEX = seq(from = 1, to = n(), by = 1.0),
+         WINDOW_START = INDEX - 10,
+         WINDOW_END = INDEX + 10,
+         WINDOW = word(string = TEXT, start = WINDOW_START, end = WINDOW_END, sep = "[ \n]+")) %>% 
+  nlp_keywordwindow_datatable()
+```
+
+Hmm, that gave us an error _and_ the first and last few rows have blank text windows - what's going on? The first window that actually appears has a window start of 1 - negative numbers and 0 seem to give `word()` a problem. Similarly, the last 10 rows all have problems because `WINDOW_END` is a index that doesn't exist (since they go beyond the end of the content in `TEXT`). We can add a couple of checks to make sure that windows that extend beyond the start or the finish of the note default to the first or last word, respectively. 
+
+```{r, eval = FALSE}
+example_note %>% 
+  mutate(WORDS = TEXT) %>% 
+  separate_rows(WORDS, sep = "[ \n]+") %>% 
+  mutate(INDEX = seq(from = 1, to = n(), by = 1.0),
+         WINDOW_START = case_when(INDEX - 10 < 1 ~ 1,
+                                  TRUE ~ INDEX - 10),
+         WINDOW_END = case_when(INDEX + 10 > max(INDEX) ~ max(INDEX),
+                                TRUE ~ INDEX + 10),
+         WINDOW = word(string = TEXT, start = WINDOW_START, end = WINDOW_END, sep = "[ \n]+"))
+```
+
+<p class="coding-explanation">
+<strong>Code Explanation:</strong>
+In this code we added two `case_when()` arguments. For `WINDOW_START` this function tests whether the value of `INDEX` - 10 is less than 1 - if it is then it puts the number 1. If it isn't, then it uses the value of `INDEX` - 10. Then in `WINDOW_END` it checks whether the `INDEX` + 10 value is larger than the maximum `INDEX` value. If it is larger, then it defaults to the maximum `INDEX` value. Otherwise it uses `INDEX` + 10. 
+</p>
+
+```{r, echo = FALSE}
+example_note %>% 
+  mutate(WORDS = TEXT) %>% 
+  separate_rows(WORDS, sep = "[ \n]+") %>% 
+  mutate(INDEX = seq(from = 1, to = n(), by = 1.0),
+         WINDOW_START = case_when(INDEX - 10 < 1 ~ 1,
+                                  TRUE ~ INDEX - 10),
+         WINDOW_END = case_when(INDEX + 10 > max(INDEX) ~ max(INDEX),
+                                TRUE ~ INDEX + 10),
+         WINDOW = word(string = TEXT, start = WINDOW_START, end = WINDOW_END, sep = "[ \n]+")) %>%
+  nlp_keywordwindow_datatable()
+```
+
+Now let's filter just to the windows that we want - the ones for our keywords of interest. We can just filter this list based on `WORDS` that match out keyword regular expression.
+
+```{r, eval = FALSE}
+example_note %>% 
+  mutate(WORDS = TEXT) %>% 
+  separate_rows(WORDS, sep = "[ \n]+") %>% 
+  mutate(INDEX = seq(from = 1, to = n(), by = 1.0),
+         WINDOW_START = case_when(INDEX - 10 < 1 ~ 1,
+                                  TRUE ~ INDEX - 10),
+         WINDOW_END = case_when(INDEX + 10 > max(INDEX) ~ max(INDEX),
+                                TRUE ~ INDEX + 10),
+         WINDOW = word(string = TEXT, start = WINDOW_START, end = WINDOW_END, sep = "[ \n]+")) %>% 
+  filter(str_detect(string = WORDS, pattern = regex("(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", ignore_case = TRUE)))
+```
+
+<p class="coding-explanation">
+<strong>Code Explanation:</strong>
+Remember that `filter()` will only select rows that match our condition. `str_detect()` searches the text in the `string = ` variable (in this case `WORDS`) and if text matching the `pattern` is present it will return TRUE. Finally, the `regex()` function allows you to perform case-insensitive searches with the `ignore_case = TRUE` argument. 
+</p>
+
+```{r, echo = FALSE}
+example_note %>% 
+  mutate(WORDS = TEXT) %>% 
+  separate_rows(WORDS, sep = "[ \n]+") %>% 
+  mutate(INDEX = seq(from = 1, to = n(), by = 1.0),
+         WINDOW_START = case_when(INDEX - 10 < 1 ~ 1,
+                                  TRUE ~ INDEX - 10),
+         WINDOW_END = case_when(INDEX + 10 > max(INDEX) ~ max(INDEX),
+                                TRUE ~ INDEX + 10),
+         WINDOW = word(string = TEXT, start = WINDOW_START, end = WINDOW_END, sep = "[ \n]+")) %>% 
+  filter(str_detect(WORDS, pattern = regex("(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", ignore_case = TRUE))) %>% 
+  nlp_keywordwindow_datatable()
+```
+
+Now that we've done this process for one note, we can easily extend this same code for all the notes in `radiology_reports` - we just want to add a `group_by()` at the start of our chain so that we do each of these steps for _each_ note independently. 
+
+```{r, eval = FALSE}
+radiology_reports %>% 
+  group_by(NOTE_ID) %>% 
+  mutate(WORDS = TEXT) %>% 
+  separate_rows(WORDS, sep = "[ \n]+") %>% 
+  mutate(INDEX = seq(from = 1, to = n(), by = 1.0),
+         WINDOW_START = case_when(INDEX - 10 < 1 ~ 1,
+                                  TRUE ~ INDEX - 10),
+         WINDOW_END = case_when(INDEX + 10 > max(INDEX) ~ max(INDEX),
+                                TRUE ~ INDEX + 10),
+         WINDOW = word(string = TEXT, start = WINDOW_START, end = WINDOW_END, sep = "[ \n]+")) %>% 
+  filter(str_detect(string = WORDS, pattern = regex("(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", ignore_case = TRUE)))
+```
+
+<p class="coding-explanation">
+<strong>Code Explanation:</strong>
+This code first groups by the column `NOTE_ID` and then applies the commands that follow to each group (i.e., each note) separately.
+</p>
+
+```{r, echo = FALSE}
+radiology_reports %>% 
+  group_by(NOTE_ID) %>% 
+  mutate(WORDS = TEXT) %>% 
+  separate_rows(WORDS, sep = "[ \n]+") %>% 
+  mutate(INDEX = seq(from = 1, to = n(), by = 1.0),
+         WINDOW_START = case_when(INDEX - 10 < 1 ~ 1,
+                                  TRUE ~ INDEX - 10),
+         WINDOW_END = case_when(INDEX + 10 > max(INDEX) ~ max(INDEX),
+                                TRUE ~ INDEX + 10),
+         WINDOW = word(string = TEXT, start = WINDOW_START, end = WINDOW_END, sep = "[ \n]+")) %>% 
+  filter(str_detect(string = WORDS, pattern = regex("(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", ignore_case = TRUE))) %>% 
+  nlp_keywordwindow_datatable()
+```
+
+
+#### Try it out for yourself:
+
+* Extract keyword windows from the discharge summaries that match keywords for hypertension and blood pressure.
+* How many notes mention hypertension? How about blood pressure (or BP)?
+* How many keyword windows that mention hypertension or blood pressure did you find?
+
+[Return to Top](#top-link)
+
+
+### Making a Window Extraction Function
+
+Once thing that helps make the window extraction process faster is to turn the code into a single function that you can easily adjust the window size or search string without having to manually adjust both the window start and end values every time you want to try something new. Let's learn how to do that! To build an R function you want to use this general format:
+
+```{r, eval = FALSE}
+name <- function(variables) {
+  
+}
+```
+
+<p class="coding-explanation">
+<strong>Code Explanation:</strong> The basic template for a function declaration is to create a function name `name` and define the inputs to your function `variables`.
+</p>
+
+Let's name our function `extract_text_window` and give it inputs for the data frame containing the notes, the keyword of interest, and the size of the window.
+
+```{r, eval = FALSE}
+extract_text_window <- function(dataframe, keyword, half_window_size) {
+  
+}
+```
+
+<p class="coding-explanation">
+<strong>Code Explanation:</strong> The function is called `extract_text_window` and the variables sent into the function are the `dataframe` that contains the notes you want to process, the `keyword` regular expression you want to search for, and the `half_window_size` you want to extract.
+</p>
+
+Remember our original code to extract the text window from radiology report?
+
+```{r, eval = FALSE}
+radiology_reports %>% 
+  group_by(NOTE_ID) %>% 
+  mutate(WORDS = TEXT) %>% 
+  separate_rows(WORDS, sep = "[ \n]+") %>% 
+  mutate(INDEX = seq(from = 1, to = n(), by = 1.0),
+         WINDOW_START = case_when(INDEX - 10 < 1 ~ 1,
+                                  TRUE ~ INDEX - 10),
+         WINDOW_END = case_when(INDEX + 10 > max(INDEX) ~ max(INDEX),
+                                TRUE ~ INDEX + 10),
+         WINDOW = word(string = TEXT, start = WINDOW_START, end = WINDOW_END, sep = "[ \n]+")) %>% 
+  filter(str_detect(string = WORDS, pattern = regex("(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", ignore_case = TRUE)))
+```
+
+We can make a few changes here to put it into the function:
+
+```{r, eval = FALSE}
+extract_text_window <- function(dataframe, keyword, half_window_size) {
+  dataframe %>% 
+    group_by(NOTE_ID) %>% 
+    mutate(WORDS = TEXT) %>% 
+    separate_rows(WORDS, sep = "[ \n]+") %>% 
+    mutate(INDEX = seq(from = 1, to = n(), by = 1.0),
+           WINDOW_START = case_when(INDEX - half_window_size < 1 ~ 1,
+                                    TRUE ~ INDEX - half_window_size),
+           WINDOW_END = case_when(INDEX + half_window_size > max(INDEX) ~ max(INDEX),
+                                  TRUE ~ INDEX + half_window_size),
+           WINDOW = word(string = TEXT, start = WINDOW_START, end = WINDOW_END, sep = "[ \n]+")) %>% 
+    ungroup() %>% 
+    filter(str_detect(string = WORDS, pattern = regex(keyword, ignore_case = TRUE)))
+}
+```
+
+<div class="coding-explanation">
+<strong>Code Explanation:</strong> We did three things here:  
+
+1) We renamed the input data frame (`radiology_reports` in the example) to `dataframe` - the input declared in the function. This data frame should have at least two columns labeled `NOTE_ID` and `TEXT`. 
+2) We substituted the variable `keyword` where the old regular expression (`"(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])"`) used to be. 
+3) We replaced all the old window size variables (`10` in the example) with the variable `half_window_size`.
+4) We added an `ungroup()` command to avoid the grouping being passed on to our future analyses. 
+</div>
+
+```{r, echo = FALSE}
+extract_text_window <- function(dataframe, keyword, half_window_size) {
+  dataframe %>% 
+    group_by(NOTE_ID) %>% 
+    mutate(WORDS = TEXT) %>% 
+    separate_rows(WORDS, sep = "[ \n]+") %>% 
+    mutate(INDEX = seq(from = 1, to = n(), by = 1.0),
+           WINDOW_START = case_when(INDEX - half_window_size < 1 ~ 1,
+                                    TRUE ~ INDEX - half_window_size),
+           WINDOW_END = case_when(INDEX + half_window_size > max(INDEX) ~ max(INDEX),
+                                  TRUE ~ INDEX + half_window_size),
+           WINDOW = word(string = TEXT, start = WINDOW_START, end = WINDOW_END, sep = "[ \n]+")) %>% 
+    ungroup() %>% 
+    filter(str_detect(string = WORDS, pattern = regex(keyword, ignore_case = TRUE)))
+}
+```
+
+Let's see how this works in practice:
+
+```{r, eval = FALSE}
+radiology_reports %>% 
+  extract_text_window(keyword = "(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", half_window_size = 10)
+```
+
+
+```{r, echo = FALSE}
+radiology_reports %>% 
+  extract_text_window(keyword = "(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", half_window_size = 10) %>% 
+  nlp_keywordwindow_datatable()
+```
+
+#### Try it out for yourself:
+
+Building functions in R is beyond the scope of this course and Specialization. However if you would like additional information check out the [Functions](http://adv-r.had.co.nz/Functions.html) Chapter of the ["Advanced R"](http://adv-r.had.co.nz/) book by Hadley Wickham. Of note, building functions safely with dplyr verbs (i.e., not assuming column names as we have done here) requires some additional considerations - you can learn more in the [dplyr Programming Vignette](https://cran.r-project.org/web/packages/dplyr/vignettes/programming.html).
+
+[Return to Top](#top-link)
+
+## Process Text Window {.tabset}
+
+Once you have the desired text-windows your next steps depend on which search task you are applying: 
+
+1. Confirming Keyword
+2. Identifying information around the keyword
+3. Extracting information around the keyword
+
+### Confirming Keyword
+
+As described in the "Identifying Search Strategy" section, our goal with this search task is to confirm that they keyword we selected is accurate for the patient in question. To do that, we will:
+
+1. Initially assume that any mention of cyst/s or cystic in the report of a CT scan of the abdomen/pelvis indicates the patient has a cyst in the abdomen/pelvis.
+2. Search cyst keyword windows for evidence of negation or unrelated disease/patient. If present, remove that text window from consideration. 
+3. If a note has one or more cyst keyword windows that have not been removed in Step 2 -> conclude scan identified cyst in the abdomen and/or pelvis. 
+
+Let's try it out! 
+
+#### Step 1
+
+Step 1 is simply the assumption that if the text window has the keyword text string then it is positive. We can move on to Step 2
+
+#### Step 2
+
+Now let's take a look at the cyst text windows and look to see if any of the cyst mentions are negated or referencing another person or condition.
+
+```{r, eval = FALSE}
+radiology_reports %>% 
+  extract_text_window(keyword = "(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", half_window_size = 10)
+```
+
+```{r, echo = FALSE}
+radiology_reports %>% 
+  extract_text_window(keyword = "(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", half_window_size = 10) %>% 
+  nlp_keywordwindow_datatable()
+```
+
+Wow! The very first note is negated - let's build a regular expression to catch this type of pattern.
+
+```{r, eval = FALSE}
+radiology_reports %>% 
+  extract_text_window(keyword = "(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", half_window_size = 10) %>% 
+  mutate(EXCLUDE = case_when(str_detect(WINDOW, regex(pattern = "no evidence of (\\w+ ){2}cyst(s)?", ignore_case = TRUE)) ~ 1,
+                             TRUE ~ 0))
+
+```
+
+<p class="coding-explanation">
+<strong>Code Explanation:</strong>
+In this code I am using `mutate()` to make a new column `EXCLUDE` that equals 1 when a text string in `WINDOW` matches the regular expression `"no evidence of (\\w+ ){2}cyst(s)?` ignoring the case (capitalization) of the words.
+</p>
+
+```{r, echo = FALSE}
+radiology_reports %>% 
+  extract_text_window(keyword = "(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", half_window_size = 10) %>% 
+  mutate(EXCLUDE = case_when(str_detect(WINDOW, regex(pattern = "no evidence of (\\w+ ){2}cyst(s)?", ignore_case = TRUE)) ~ 1,
+                             TRUE ~ 0)) %>% 
+  nlp_keywordwindow_datatable()
+```
+
+As you look through the remaining windows, there aren't any other that match this regular expression, nor does there appear to be any other negated mentions. 
+
+#### Step 3
+
+Now we can create a list of all notes that include at least one non-negated mention of a cyst.
+
+```{r, eval = FALSE}
+radiology_reports %>% 
+  extract_text_window(keyword = "(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", half_window_size = 10) %>% 
+  mutate(EXCLUDE = case_when(str_detect(WINDOW, regex(pattern = "no evidence of (\\w+ ){2}cyst(s)?", ignore_case = TRUE)) ~ 1,
+                             TRUE ~ 0)) %>% 
+  filter(EXCLUDE != 1) %>% 
+  distinct(NOTE_ID)
+```
+
+<p class="coding-explanation">
+<strong>Code Explanation:</strong>
+This code filters to all windows that were not excluded (`EXCLUDE != 1`) and then returns a list of unique NOTE_IDs that had at least one, non-negated cyst window.
+</p>
+
+```{r, echo = FALSE}
+radiology_reports %>% 
+  extract_text_window(keyword = "(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", half_window_size = 10) %>% 
+  mutate(EXCLUDE = case_when(str_detect(WINDOW, regex(pattern = "no evidence of (\\w+ ){2}cyst(s)?", ignore_case = TRUE)) ~ 1,
+                             TRUE ~ 0)) %>% 
+  filter(EXCLUDE != 1) %>% 
+  distinct(NOTE_ID) 
+```
+
+#### Try it out for yourself:
+
+* How many discharge summaries had hypertension windows that were negated?
+
+[Return to Top](#top-link)
+
+### Identifying Keyword Information
+
+Now let's look for which patients have a splenic cyst (cyst of the spleen). We will try the following approach:
+
+1. Search all cyst keyword windows for evidence that the cyst occurs in the spleen. If evidence that the cyst is in the spleen then keep the keyword window. If the cyst located elsewhere or location is not specified then remove the text window from consideration.
+2. Search all splenic cyst keyword windows for evidence of negation or unrelated disease/patient. If present, remove that text window from consideration. 
+3. If a note has one or more splenic cyst keyword windows that have not been removed in Step 2 -> conclude the scan identified a splenic cyst.
+
+#### Step 1
+Again, start by looking at the first few windows to see which are of the spleen and how they are described so you can start writing regular expressions. 
+
+```{r, eval = FALSE}
+radiology_reports %>% 
+  extract_text_window(keyword = "(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", half_window_size = 10)
+```
+
+```{r, echo = FALSE}
+radiology_reports %>% 
+  extract_text_window(keyword = "(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", half_window_size = 10) %>% 
+  nlp_keywordwindow_datatable()
+```
+
+OK, the third text window (NOTE_ID = 3, INDEX = 108) has a cyst of the spleen and uses the phrase "splenic cyst".
+
+Let's write a regular expression for this term and see whether any other windows use the same language!
+
+```{r, eval = FALSE}
+radiology_reports %>% 
+  extract_text_window(keyword = "(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", half_window_size = 10) %>% 
+  mutate(SPLEEN_CYST = case_when(str_detect(WINDOW, regex("splenic cyst(s)?", ignore_case = TRUE)) ~ 1,
+                                 TRUE ~ 0)) %>% 
+  arrange(desc(SPLEEN_CYST))
+```
+
+<p class="coding-explanation">
+<strong>Code Explanation:</strong>
+In this code I am using `mutate()` to add a column `SPLEEN_CYST` that equals 1 if the `str_detect()` function identifies the phrase "splenic cyst" or "splenic cysts" regardless of case. If no match is detected then `SPLEEN_CYST` equals 0. To make it easier to see windows that meet this criteria I am sorting the data frame using the `arrange()` command to sort descending by `SPLEEN_CYST`.
+</p>
+
+```{r, echo = FALSE}
+radiology_reports %>% 
+  extract_text_window(keyword = "(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", half_window_size = 10) %>% 
+  mutate(SPLEEN_CYST = case_when(str_detect(WINDOW, regex("splenic cyst(s)?", ignore_case = TRUE)) ~ 1,
+                                 TRUE ~ 0)) %>% 
+  arrange(desc(SPLEEN_CYST)) %>% 
+  nlp_keywordwindow_datatable()
+```
+
+OK, it looks like that is the only window that uses the term "splenic cyst". Go through the remaining windows and see if any of the other windows mention a cyst of the spleen.
+
+After your search you likely found another window (NOTE_ID = 3, INDEX = 368), that uses the phrase "Low-attenuation lesions in the spleen may represent cyst". We can add that to our regular expression:
+
+```{r, eval = FALSE}
+radiology_reports %>% 
+  extract_text_window(keyword = "(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", half_window_size = 10) %>% 
+  mutate(SPLEEN_CYST = case_when(str_detect(WINDOW, regex("splenic cyst(s)?", ignore_case = TRUE)) ~ 1,
+                                 str_detect(WINDOW, regex("spleen may represent cyst(s)?", ignore_case = TRUE)) ~ 1,
+                                 TRUE ~ 0)) %>% 
+  arrange(desc(SPLEEN_CYST))
+```
+
+```{r, echo = FALSE}
+radiology_reports %>% 
+  extract_text_window(keyword = "(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", half_window_size = 10) %>% 
+  mutate(SPLEEN_CYST = case_when(str_detect(WINDOW, regex("splenic cyst(s)?", ignore_case = TRUE)) ~ 1,
+                                 str_detect(WINDOW, regex("spleen may represent cyst(s)?", ignore_case = TRUE)) ~ 1,
+                                 TRUE ~ 0)) %>% 
+  arrange(desc(SPLEEN_CYST)) %>% 
+  nlp_keywordwindow_datatable()
+```
+
+You may also have seen that there were a couple of windows that didn't have any location information. Specifically:
+
+* NOTE_ID = 7, INDEX = 73 - Location outside of the window, looking at the full note (TIP: you can hover over the `TEXT` field in the table and it will show you the full note), it appears this is on the pancreas. 
+* NOTE_ID = 10, INDEX = 57 - A second cyst is mentioned in the window without a clear location. However that cyst mention is captured by the next window (NOTE_ID = 10, INDEX = 62), which does have a location mentioned.
+* NOTE_ID = 10, INDEX = 153 - Cyst mentioned without a clear location. There are 7 other cyst windows in this note, location is probably captured in one of the other windows.
+
+These three cases actually are great examples about how to judge when to increase a window size. If I were doing this with a much larger data set of hundreds or thousands of notes, the only missing location window that would cause me to consider increasing window size is the one from Note 7. In that particular case the location is just outside my window (3 words away). I wouldn't use either window from Note 10 to influence my decision to increase my window for two reasons: First, for window 57 the second cyst location is actually captured in another window (INDEX = 62) thus it isn't that the window is too small, just that it also captured part of another window. Second, for window 153 from the context of the window it is clear that there is no location to be found near this cyst mention. Increasing my window size won't help in this situation. 
+
+Because there is only one window out of 19 that is too small, in this case I would leave my window size as is. 
+
+#### Step 2
+
+Now that we have identified which windows have a cyst in the spleen, you will want to do a quick check of those windows to ensure that there are no negated mentions.
+
+```{r, eval = FALSE}
+radiology_reports %>% 
+  extract_text_window(keyword = "(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", half_window_size = 10) %>% 
+  mutate(SPLEEN_CYST = case_when(str_detect(WINDOW, regex("splenic cyst(s)?", ignore_case = TRUE)) ~ 1,
+                                 str_detect(WINDOW, regex("spleen may represent cyst(s)?", ignore_case = TRUE)) ~ 1,
+                                 TRUE ~ 0)) %>% 
+  filter(SPLEEN_CYST == 1)
+```
+
+<p class="coding-explanation">
+<strong>Code Explanation:</strong>
+In this code I am just adding a filter to only show those text windows that have a spleen cyst (i.e., `SPLEEN_CYST` equal to 1).
+</p>
+
+```{r, echo = FALSE}
+radiology_reports %>% 
+  extract_text_window(keyword = "(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", half_window_size = 10) %>% 
+  mutate(SPLEEN_CYST = case_when(str_detect(WINDOW, regex("splenic cyst(s)?", ignore_case = TRUE)) ~ 1,
+                                 str_detect(WINDOW, regex("spleen may represent cyst(s)?", ignore_case = TRUE)) ~ 1,
+                                 TRUE ~ 0)) %>% 
+  filter(SPLEEN_CYST == 1) %>% 
+  nlp_keywordwindow_datatable()
+```
+
+Neither have any negation and thus can stay in our analysis!
+
+#### Step 3
+
+Since no windows were removed in Step 2, we can simply look at the unique NOTE_ID and know which notes identified a splenic cyst!
+
+```{r}
+radiology_reports %>% 
+  extract_text_window(keyword = "(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", half_window_size = 10) %>% 
+  mutate(SPLEEN_CYST = case_when(str_detect(WINDOW, regex("splenic cyst(s)?", ignore_case = TRUE)) ~ 1,
+                                 str_detect(WINDOW, regex("spleen may represent cyst(s)?", ignore_case = TRUE)) ~ 1,
+                                 TRUE ~ 0)) %>% 
+  filter(SPLEEN_CYST == 1) %>% 
+  distinct(NOTE_ID)
+```
+
+
+#### Try it out for yourself:
+
+* There's not an analogous task in the hypertension example notes, so to give you practice try identifying which radiology reports identify a cyst of the kidney. Note: if the report mentions "upper pole", "mid pole", etc. these are all referencing the kidney. This is one of those cases where having some medical/domain expertise is helpful! 
+
+[Return to Top](#top-link)
+
+
+### Extracting Keyword Information
+
+Now let's try the extraction task to identify _where_ the cyst is located using the following approach:
+
+1. Search cyst keyword windows for evidence of negation or unrelated disease/patient. If present, remove that text window from consideration.
+2. For all remaining cyst keyword windows, write regular expressions to extract location of the cyst. Depending on your goal, you may need to map specific locations to organ groups (e.g., "left anterior mid pole region" -> "Kidney").
+
+#### Step 1
+
+This is just what we did in the "Confirming Keyword" section - let's just grab that code and reuse it here!
+
+```{r, eval = FALSE}
+radiology_reports %>% 
+  extract_text_window(keyword = "(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", half_window_size = 10) %>% 
+  mutate(EXCLUDE = case_when(str_detect(WINDOW, regex(pattern = "no evidence of (\\w+ ){2}cyst(s)?", ignore_case = TRUE)) ~ 1,
+                             TRUE ~ 0)) %>% 
+  filter(EXCLUDE != 1)
+```
+
+#### Step 2
+
+OK, now the hard part begins! Let's start writing regular expressions to identify cyst location - to make this more meaningful let's also do a translation of location (e.g., splenic and spleen would both be labelled as "spleen".
+
+We already have two regular expressions to identify splenic cysts:
+
+```{r, eval = FALSE}
+radiology_reports %>% 
+  extract_text_window(keyword = "(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", half_window_size = 10) %>% 
+  mutate(EXCLUDE = case_when(str_detect(WINDOW, regex(pattern = "no evidence of (\\w+ ){2}cyst(s)?", ignore_case = TRUE)) ~ 1,
+                             TRUE ~ 0)) %>% 
+  filter(EXCLUDE != 1) %>% 
+  mutate(LOCATION = case_when(str_detect(WINDOW, regex("splenic cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              str_detect(WINDOW, regex("spleen may represent cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              TRUE ~ ""))
+```
+
+<p class="coding-explanation">
+<strong>Code Explanation:</strong>
+In this code we first filter to exclude any windows that have be identified as a negated cyst mention (i.e., EXCLUDE equal to 1). Then I used the `mutate()` function to create a new variable `LOCATION` that has a value of "spleen" if one of our two splenic regular expressions is found in the `WINDOW` variable. If neither is found, then `LOCATION` is listed as blank ("").
+</p>
+
+```{r, echo = FALSE}
+radiology_reports %>% 
+  extract_text_window(keyword = "(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", half_window_size = 10) %>% 
+  mutate(EXCLUDE = case_when(str_detect(WINDOW, regex(pattern = "no evidence of (\\w+ ){2}cyst(s)?", ignore_case = TRUE)) ~ 1,
+                             TRUE ~ 0)) %>% 
+  filter(EXCLUDE != 1) %>% 
+  mutate(LOCATION = case_when(str_detect(WINDOW, regex("splenic cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              str_detect(WINDOW, regex("spleen may represent cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              TRUE ~ "")) %>% 
+  nlp_keywordwindow_datatable()
+```
+ 
+Now start going through those windows that don't have a value for `LOCATION` yet, let's just look at the first one:
+
+```{r, echo = FALSE}
+radiology_reports %>% 
+  extract_text_window(keyword = "(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", half_window_size = 10) %>% 
+  mutate(EXCLUDE = case_when(str_detect(WINDOW, regex(pattern = "no evidence of (\\w+ ){2}cyst(s)?", ignore_case = TRUE)) ~ 1,
+                             TRUE ~ 0)) %>% 
+  filter(EXCLUDE != 1) %>% 
+  mutate(LOCATION = case_when(str_detect(WINDOW, regex("splenic cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              str_detect(WINDOW, regex("spleen may represent cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              TRUE ~ "")) %>% 
+  slice(1) %>% 
+  nlp_keywordwindow_datatable()
+```
+
+In this example, we can see that the location of the cyst is in the "inferior pole" of the right kidney". The most general way we could capture this location is just to use the search term "kidney". This is a bit dangerous because if the kidney is mentioned about some other pathology - not a cyst - this would give us a false-positive location. 
+
+This window actually shows us the danger of this approach - if for our splenic cysts we just used the term "spleen" this window would have been selected. There are a couple of ways to handle this issue:
+
+1. You could try the regular expression and see if there are any off target matches - if not you can use it as is. This will work just fine for the exact set of notes you checked, but if you add notes or apply your algorithm to another data set this may not be true.
+2. You can build more specific regular expressions that capture both the location and the word cyst. Unfortunately this approach means that you will need to write more regular expressions and do a lot more manual curation of the corpus to capture all mentions. 
+
+A third option for other tasks would be to use the first option (use the general regular expression) and then make the windows smaller to avoid off-target mentions. Unfortunately in this example, as you have probably noticed, many of the text windows have the cyst location right at the edge of the window. We can't shrink the window without losing the very information we want to extract! 
+
+I'm going to go ahead and use the first approach for now. To make our job of reviewing the matching windows easier, before I put the regular expression into the `mutate()` statement, I'm just going to filter to matching windows so we can review if there are off-target matches.
+
+```{r, eval = FALSE}
+radiology_reports %>% 
+  extract_text_window(keyword = "(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", half_window_size = 10) %>% 
+  mutate(EXCLUDE = case_when(str_detect(WINDOW, regex(pattern = "no evidence of (\\w+ ){2}cyst(s)?", ignore_case = TRUE)) ~ 1,
+                             TRUE ~ 0)) %>% 
+  filter(EXCLUDE != 1) %>% 
+  mutate(LOCATION = case_when(str_detect(WINDOW, regex("splenic cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              str_detect(WINDOW, regex("spleen may represent cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              TRUE ~ "")) %>% 
+  filter(str_detect(WINDOW, regex("kidney", ignore_case = TRUE)))
+```
+
+```{r, echo = FALSE}
+radiology_reports %>% 
+  extract_text_window(keyword = "(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", half_window_size = 10) %>% 
+  mutate(EXCLUDE = case_when(str_detect(WINDOW, regex(pattern = "no evidence of (\\w+ ){2}cyst(s)?", ignore_case = TRUE)) ~ 1,
+                             TRUE ~ 0)) %>% 
+  filter(EXCLUDE != 1) %>% 
+  mutate(LOCATION = case_when(str_detect(WINDOW, regex("splenic cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              str_detect(WINDOW, regex("spleen may represent cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              TRUE ~ "")) %>% 
+  filter(str_detect(WINDOW, regex("kidney", ignore_case = TRUE))) %>% 
+  nlp_keywordwindow_datatable()
+```
+
+This actually looks OK - no off target matches. We can add it to the `mutate()` statement and look at the next unlabeled window!
+
+```{r, eval = FALSE}
+radiology_reports %>% 
+  extract_text_window(keyword = "(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", half_window_size = 10) %>% 
+  mutate(EXCLUDE = case_when(str_detect(WINDOW, regex(pattern = "no evidence of (\\w+ ){2}cyst(s)?", ignore_case = TRUE)) ~ 1,
+                             TRUE ~ 0)) %>% 
+  filter(EXCLUDE != 1) %>% 
+  mutate(LOCATION = case_when(str_detect(WINDOW, regex("splenic cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              str_detect(WINDOW, regex("spleen may represent cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              str_detect(WINDOW, regex("kidney", ignore_case = TRUE)) ~ "kidney",
+                              TRUE ~ ""))
+```
+
+```{r, echo = FALSE}
+radiology_reports %>% 
+  extract_text_window(keyword = "(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", half_window_size = 10) %>% 
+  mutate(EXCLUDE = case_when(str_detect(WINDOW, regex(pattern = "no evidence of (\\w+ ){2}cyst(s)?", ignore_case = TRUE)) ~ 1,
+                             TRUE ~ 0)) %>% 
+  filter(EXCLUDE != 1) %>% 
+  mutate(LOCATION = case_when(str_detect(WINDOW, regex("splenic cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              str_detect(WINDOW, regex("spleen may represent cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              str_detect(WINDOW, regex("kidney", ignore_case = TRUE)) ~ "kidney",
+                              TRUE ~ "")) %>% 
+  nlp_keywordwindow_datatable()
+```
+
+The next unlabeled window is NOTE_ID = 3, INDEX = 409 and references the cyst location as either an ovarian or dermoid cyst. Let's follow the same process:
+
+```{r, eval = FALSE}
+radiology_reports %>% 
+  extract_text_window(keyword = "(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", half_window_size = 10) %>% 
+  mutate(EXCLUDE = case_when(str_detect(WINDOW, regex(pattern = "no evidence of (\\w+ ){2}cyst(s)?", ignore_case = TRUE)) ~ 1,
+                             TRUE ~ 0)) %>% 
+  filter(EXCLUDE != 1) %>% 
+  mutate(LOCATION = case_when(str_detect(WINDOW, regex("splenic cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              str_detect(WINDOW, regex("spleen may represent cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              str_detect(WINDOW, regex("kidney", ignore_case = TRUE)) ~ "kidney",
+                              TRUE ~ "")) %>% 
+  filter(str_detect(WINDOW, regex("ovary", ignore_case = TRUE)))
+```
+
+```{r, echo = FALSE}
+radiology_reports %>% 
+  extract_text_window(keyword = "(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", half_window_size = 10) %>% 
+  mutate(EXCLUDE = case_when(str_detect(WINDOW, regex(pattern = "no evidence of (\\w+ ){2}cyst(s)?", ignore_case = TRUE)) ~ 1,
+                             TRUE ~ 0)) %>% 
+  filter(EXCLUDE != 1) %>% 
+  mutate(LOCATION = case_when(str_detect(WINDOW, regex("splenic cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              str_detect(WINDOW, regex("spleen may represent cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              str_detect(WINDOW, regex("kidney", ignore_case = TRUE)) ~ "kidney",
+                              TRUE ~ "")) %>% 
+  filter(str_detect(WINDOW, regex("ovary", ignore_case = TRUE))) %>% 
+  nlp_keywordwindow_datatable()
+```
+
+Unfortunately there is only the one ovarian cyst - but it's correct, so we can add it and look at the next window.
+
+```{r, eval = FALSE}
+radiology_reports %>% 
+  extract_text_window(keyword = "(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", half_window_size = 10) %>% 
+  mutate(EXCLUDE = case_when(str_detect(WINDOW, regex(pattern = "no evidence of (\\w+ ){2}cyst(s)?", ignore_case = TRUE)) ~ 1,
+                             TRUE ~ 0)) %>% 
+  filter(EXCLUDE != 1) %>% 
+  mutate(LOCATION = case_when(str_detect(WINDOW, regex("splenic cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              str_detect(WINDOW, regex("spleen may represent cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              str_detect(WINDOW, regex("kidney", ignore_case = TRUE)) ~ "kidney",
+                              str_detect(WINDOW, regex("ovary", ignore_case = TRUE)) ~ "ovary",
+                              TRUE ~ "")) 
+```
+
+```{r, echo = FALSE}
+radiology_reports %>% 
+  extract_text_window(keyword = "(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", half_window_size = 10) %>% 
+  mutate(EXCLUDE = case_when(str_detect(WINDOW, regex(pattern = "no evidence of (\\w+ ){2}cyst(s)?", ignore_case = TRUE)) ~ 1,
+                             TRUE ~ 0)) %>% 
+  filter(EXCLUDE != 1) %>% 
+  mutate(LOCATION = case_when(str_detect(WINDOW, regex("splenic cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              str_detect(WINDOW, regex("spleen may represent cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              str_detect(WINDOW, regex("kidney", ignore_case = TRUE)) ~ "kidney",
+                              str_detect(WINDOW, regex("ovary", ignore_case = TRUE)) ~ "ovary",
+                              TRUE ~ "")) %>% 
+  nlp_keywordwindow_datatable()
+```
+
+The next window without a location is NOTE_ID = 5, INDEX = 137 that is located in the left anterior mid pole region of the kidney. Let' try the very general term "pole" to capture the various sub-regions of the kidney at once:
+
+```{r, eval = FALSE}
+radiology_reports %>% 
+  extract_text_window(keyword = "(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", half_window_size = 10) %>% 
+  mutate(EXCLUDE = case_when(str_detect(WINDOW, regex(pattern = "no evidence of (\\w+ ){2}cyst(s)?", ignore_case = TRUE)) ~ 1,
+                             TRUE ~ 0)) %>% 
+  filter(EXCLUDE != 1) %>% 
+  mutate(LOCATION = case_when(str_detect(WINDOW, regex("splenic cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              str_detect(WINDOW, regex("spleen may represent cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              str_detect(WINDOW, regex("kidney", ignore_case = TRUE)) ~ "kidney",
+                              str_detect(WINDOW, regex("ovary", ignore_case = TRUE)) ~ "ovary",
+                              TRUE ~ ""))  %>% 
+  filter(str_detect(WINDOW, regex("pole", ignore_case = TRUE)))
+```
+
+```{r, echo = FALSE}
+radiology_reports %>% 
+  extract_text_window(keyword = "(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", half_window_size = 10) %>% 
+  mutate(EXCLUDE = case_when(str_detect(WINDOW, regex(pattern = "no evidence of (\\w+ ){2}cyst(s)?", ignore_case = TRUE)) ~ 1,
+                             TRUE ~ 0)) %>% 
+  filter(EXCLUDE != 1) %>% 
+  mutate(LOCATION = case_when(str_detect(WINDOW, regex("splenic cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              str_detect(WINDOW, regex("spleen may represent cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              str_detect(WINDOW, regex("kidney", ignore_case = TRUE)) ~ "kidney",
+                              str_detect(WINDOW, regex("ovary", ignore_case = TRUE)) ~ "ovary",
+                              TRUE ~ ""))  %>% 
+  filter(str_detect(WINDOW, regex("pole", ignore_case = TRUE))) %>% 
+  nlp_keywordwindow_datatable()
+```
+
+This captured a number of our previously classified kidney cysts, but it looks like all of them are accurate - so we can add it to our `mutate()` statement.
+
+```{r, eval = FALSE}
+radiology_reports %>% 
+  extract_text_window(keyword = "(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", half_window_size = 10) %>% 
+  mutate(EXCLUDE = case_when(str_detect(WINDOW, regex(pattern = "no evidence of (\\w+ ){2}cyst(s)?", ignore_case = TRUE)) ~ 1,
+                             TRUE ~ 0)) %>% 
+  filter(EXCLUDE != 1) %>% 
+  mutate(LOCATION = case_when(str_detect(WINDOW, regex("splenic cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              str_detect(WINDOW, regex("spleen may represent cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              str_detect(WINDOW, regex("kidney", ignore_case = TRUE)) ~ "kidney",
+                              str_detect(WINDOW, regex("ovary", ignore_case = TRUE)) ~ "ovary",
+                              str_detect(WINDOW, regex("pole", ignore_case = TRUE)) ~ "kidney",
+                              TRUE ~ "")) 
+```
+
+```{r, echo = FALSE}
+radiology_reports %>% 
+  extract_text_window(keyword = "(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", half_window_size = 10) %>% 
+  mutate(EXCLUDE = case_when(str_detect(WINDOW, regex(pattern = "no evidence of (\\w+ ){2}cyst(s)?", ignore_case = TRUE)) ~ 1,
+                             TRUE ~ 0)) %>% 
+  filter(EXCLUDE != 1) %>% 
+  mutate(LOCATION = case_when(str_detect(WINDOW, regex("splenic cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              str_detect(WINDOW, regex("spleen may represent cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              str_detect(WINDOW, regex("kidney", ignore_case = TRUE)) ~ "kidney",
+                              str_detect(WINDOW, regex("ovary", ignore_case = TRUE)) ~ "ovary",
+                              str_detect(WINDOW, regex("pole", ignore_case = TRUE)) ~ "kidney",
+                              TRUE ~ ""))  %>% 
+  nlp_keywordwindow_datatable()
+```
+
+As we previously noticed, NOTE_ID = 7, INDEX = 73 does not have any location listed inside the window. In a real problem you may want to add a manual review step at the end of your text extraction to look at any unclassified windows to see if you can capture a location by extending the window. However for now we will move on to the next unlabeled window - NOTE_ID = 7, INDEX = 144. This has a cyst in the adnexal region - also known as the adnexa. Let's create a regular expression that will find both references and check it's accuracy.
+
+```{r, eval = FALSE}
+radiology_reports %>% 
+  extract_text_window(keyword = "(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", half_window_size = 10) %>% 
+  mutate(EXCLUDE = case_when(str_detect(WINDOW, regex(pattern = "no evidence of (\\w+ ){2}cyst(s)?", ignore_case = TRUE)) ~ 1,
+                             TRUE ~ 0)) %>% 
+  filter(EXCLUDE != 1) %>% 
+  mutate(LOCATION = case_when(str_detect(WINDOW, regex("splenic cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              str_detect(WINDOW, regex("spleen may represent cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              str_detect(WINDOW, regex("kidney", ignore_case = TRUE)) ~ "kidney",
+                              str_detect(WINDOW, regex("ovary", ignore_case = TRUE)) ~ "ovary",
+                              str_detect(WINDOW, regex("pole", ignore_case = TRUE)) ~ "kidney",
+                              TRUE ~ ""))   %>% 
+  filter(str_detect(WINDOW, regex("adnexa(l)?", ignore_case = TRUE)))
+```
+
+```{r, echo = FALSE}
+radiology_reports %>% 
+  extract_text_window(keyword = "(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", half_window_size = 10) %>% 
+  mutate(EXCLUDE = case_when(str_detect(WINDOW, regex(pattern = "no evidence of (\\w+ ){2}cyst(s)?", ignore_case = TRUE)) ~ 1,
+                             TRUE ~ 0)) %>% 
+  filter(EXCLUDE != 1) %>% 
+  mutate(LOCATION = case_when(str_detect(WINDOW, regex("splenic cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              str_detect(WINDOW, regex("spleen may represent cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              str_detect(WINDOW, regex("kidney", ignore_case = TRUE)) ~ "kidney",
+                              str_detect(WINDOW, regex("ovary", ignore_case = TRUE)) ~ "ovary",
+                              str_detect(WINDOW, regex("pole", ignore_case = TRUE)) ~ "kidney",
+                              TRUE ~ ""))   %>% 
+  filter(str_detect(WINDOW, regex("adnexa(l)?", ignore_case = TRUE))) %>% 
+  nlp_keywordwindow_datatable()
+```
+
+Excellent! This captured an extra window that labeled the cystic lesion in the adnexa. Let's add it to our `mutate()` statement.
+
+```{r, eval = FALSE}
+radiology_reports %>% 
+  extract_text_window(keyword = "(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", half_window_size = 10) %>% 
+  mutate(EXCLUDE = case_when(str_detect(WINDOW, regex(pattern = "no evidence of (\\w+ ){2}cyst(s)?", ignore_case = TRUE)) ~ 1,
+                             TRUE ~ 0)) %>% 
+  filter(EXCLUDE != 1) %>% 
+  mutate(LOCATION = case_when(str_detect(WINDOW, regex("splenic cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              str_detect(WINDOW, regex("spleen may represent cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              str_detect(WINDOW, regex("kidney", ignore_case = TRUE)) ~ "kidney",
+                              str_detect(WINDOW, regex("ovary", ignore_case = TRUE)) ~ "ovary",
+                              str_detect(WINDOW, regex("pole", ignore_case = TRUE)) ~ "kidney",
+                              str_detect(WINDOW, regex("adnexa(l)?", ignore_case = TRUE)) ~ "adnexa",
+                              TRUE ~ "")) 
+```
+
+```{r, echo = FALSE}
+radiology_reports %>% 
+  extract_text_window(keyword = "(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", half_window_size = 10) %>% 
+  mutate(EXCLUDE = case_when(str_detect(WINDOW, regex(pattern = "no evidence of (\\w+ ){2}cyst(s)?", ignore_case = TRUE)) ~ 1,
+                             TRUE ~ 0)) %>% 
+  filter(EXCLUDE != 1) %>% 
+  mutate(LOCATION = case_when(str_detect(WINDOW, regex("splenic cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              str_detect(WINDOW, regex("spleen may represent cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              str_detect(WINDOW, regex("kidney", ignore_case = TRUE)) ~ "kidney",
+                              str_detect(WINDOW, regex("ovary", ignore_case = TRUE)) ~ "ovary",
+                              str_detect(WINDOW, regex("pole", ignore_case = TRUE)) ~ "kidney",
+                              str_detect(WINDOW, regex("adnexa(l)?", ignore_case = TRUE)) ~ "adnexa",
+                              TRUE ~ "")) %>% 
+  nlp_keywordwindow_datatable()
+```
+
+There are just a few more unlabeled windows:
+
+* NOTE_ID = 7, INDEX = 73 - the previously identified pancreatic cyst where the location fell outside the window
+* NOTE_ID = 7, INDEX = 187 - labelled as a pancreatic cyst
+* NOTE_ID = 10, INDEX = 153 - no location given in the window or immediately outside the window
+* NOTE_ID = 10, INDEX = 301 - no location given in the window or immediately outside the window
+
+With this we can check one last term, "pancreatic", and then consider our task complete!
+
+```{r, eval = FALSE}
+radiology_reports %>% 
+  extract_text_window(keyword = "(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", half_window_size = 10) %>% 
+  mutate(EXCLUDE = case_when(str_detect(WINDOW, regex(pattern = "no evidence of (\\w+ ){2}cyst(s)?", ignore_case = TRUE)) ~ 1,
+                             TRUE ~ 0)) %>% 
+  filter(EXCLUDE != 1) %>% 
+  mutate(LOCATION = case_when(str_detect(WINDOW, regex("splenic cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              str_detect(WINDOW, regex("spleen may represent cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              str_detect(WINDOW, regex("kidney", ignore_case = TRUE)) ~ "kidney",
+                              str_detect(WINDOW, regex("ovary", ignore_case = TRUE)) ~ "ovary",
+                              str_detect(WINDOW, regex("pole", ignore_case = TRUE)) ~ "kidney",
+                              str_detect(WINDOW, regex("adnexa(l)?", ignore_case = TRUE)) ~ "adnexa",
+                              TRUE ~ ""))  %>% 
+  filter(str_detect(WINDOW, regex("pancreatic", ignore_case = TRUE)))
+```
+
+```{r, echo = FALSE}
+radiology_reports %>% 
+  extract_text_window(keyword = "(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", half_window_size = 10) %>% 
+  mutate(EXCLUDE = case_when(str_detect(WINDOW, regex(pattern = "no evidence of (\\w+ ){2}cyst(s)?", ignore_case = TRUE)) ~ 1,
+                             TRUE ~ 0)) %>% 
+  filter(EXCLUDE != 1) %>% 
+  mutate(LOCATION = case_when(str_detect(WINDOW, regex("splenic cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              str_detect(WINDOW, regex("spleen may represent cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              str_detect(WINDOW, regex("kidney", ignore_case = TRUE)) ~ "kidney",
+                              str_detect(WINDOW, regex("ovary", ignore_case = TRUE)) ~ "ovary",
+                              str_detect(WINDOW, regex("pole", ignore_case = TRUE)) ~ "kidney",
+                              str_detect(WINDOW, regex("adnexa(l)?", ignore_case = TRUE)) ~ "adnexa",
+                              TRUE ~ ""))  %>% 
+  filter(str_detect(WINDOW, regex("pancreatic", ignore_case = TRUE))) %>% 
+  nlp_keywordwindow_datatable()
+```
+
+Excellent! This captured an extra window that labeled the cystic lesion in the adnexa. Let's add it to our `mutate()` statement.
+
+```{r, eval = FALSE}
+radiology_reports %>% 
+  extract_text_window(keyword = "(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", half_window_size = 10) %>% 
+  mutate(EXCLUDE = case_when(str_detect(WINDOW, regex(pattern = "no evidence of (\\w+ ){2}cyst(s)?", ignore_case = TRUE)) ~ 1,
+                             TRUE ~ 0)) %>% 
+  filter(EXCLUDE != 1) %>% 
+  mutate(LOCATION = case_when(str_detect(WINDOW, regex("splenic cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              str_detect(WINDOW, regex("spleen may represent cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              str_detect(WINDOW, regex("kidney", ignore_case = TRUE)) ~ "kidney",
+                              str_detect(WINDOW, regex("ovary", ignore_case = TRUE)) ~ "ovary",
+                              str_detect(WINDOW, regex("pole", ignore_case = TRUE)) ~ "kidney",
+                              str_detect(WINDOW, regex("adnexa(l)?", ignore_case = TRUE)) ~ "adnexa",
+                              str_detect(WINDOW, regex("pancreatic", ignore_case = TRUE)) ~ "pancreas",
+                              TRUE ~ "")) 
+```
+
+```{r, echo = FALSE}
+radiology_reports %>% 
+  extract_text_window(keyword = "(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", half_window_size = 10) %>% 
+  mutate(EXCLUDE = case_when(str_detect(WINDOW, regex(pattern = "no evidence of (\\w+ ){2}cyst(s)?", ignore_case = TRUE)) ~ 1,
+                             TRUE ~ 0)) %>% 
+  filter(EXCLUDE != 1) %>% 
+  mutate(LOCATION = case_when(str_detect(WINDOW, regex("splenic cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              str_detect(WINDOW, regex("spleen may represent cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              str_detect(WINDOW, regex("kidney", ignore_case = TRUE)) ~ "kidney",
+                              str_detect(WINDOW, regex("ovary", ignore_case = TRUE)) ~ "ovary",
+                              str_detect(WINDOW, regex("pole", ignore_case = TRUE)) ~ "kidney",
+                              str_detect(WINDOW, regex("adnexa(l)?", ignore_case = TRUE)) ~ "adnexa",
+                              str_detect(WINDOW, regex("pancreatic", ignore_case = TRUE)) ~ "pancreas",
+                              TRUE ~ "")) %>% 
+  nlp_keywordwindow_datatable()
+```
+
+Given that there may be multiple cyst locations identified in a note, we can look at the distinct list of NOTE_IDs and cyst LOCATIONs to get our final outcome:
+
+```{r}
+radiology_reports %>% 
+  extract_text_window(keyword = "(?<![a-zA-Z])cyst(s|ic)?(?![a-zA-z])", half_window_size = 10) %>% 
+  mutate(EXCLUDE = case_when(str_detect(WINDOW, regex(pattern = "no evidence of (\\w+ ){2}cyst(s)?", ignore_case = TRUE)) ~ 1,
+                             TRUE ~ 0)) %>% 
+  filter(EXCLUDE != 1) %>% 
+  mutate(LOCATION = case_when(str_detect(WINDOW, regex("splenic cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              str_detect(WINDOW, regex("spleen may represent cyst(s)?", ignore_case = TRUE)) ~ "spleen",
+                              str_detect(WINDOW, regex("kidney", ignore_case = TRUE)) ~ "kidney",
+                              str_detect(WINDOW, regex("ovary", ignore_case = TRUE)) ~ "ovary",
+                              str_detect(WINDOW, regex("pole", ignore_case = TRUE)) ~ "kidney",
+                              str_detect(WINDOW, regex("adnexa(l)?", ignore_case = TRUE)) ~ "adnexa",
+                              str_detect(WINDOW, regex("pancreatic", ignore_case = TRUE)) ~ "pancreas",
+                              TRUE ~ "")) %>% 
+  distinct(NOTE_ID, LOCATION)
+```
+
+#### Try it out for yourself:
+
+* Using the discharge summaries, extract all blood pressure measurements where both systolic and diastolic numbers are listed.
+
+[Return to Top](#top-link)
+
